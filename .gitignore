@@ -1,0 +1,108 @@
+cat >> .gitignore <<'EOF'
+
+# Python environments
+venv/
+.venv/
+venv311/
+venv3111/
+**/venv/
+**/.venv/
+**/venv311/
+**/venv3111/
+
+# Python cache and testing
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Flutter generated files
+**/.dart_tool/
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/local.properties
+
+# Node dependencies
+node_modules/
+.next/
+dist/
+
+# IDE and operating system files
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files and logs
+*.log
+tmp/
+
+# Uploaded user data
+backend/uploads/
+uploads/
+
+# Large local AI artifacts
+ai/model/civic_nlp_model/
+ai/demo/model/civic_nlp_model/
+ai/models/
+ai/datasets/
+ai/nlp/dataset/
+ai/venv311/
+ai/demo/venv3111/
+EOF
+# Python environments and cache
+venv/
+.venv/
+venv311/
+venv3111/
+**/venv/
+**/.venv/
+**/venv311/
+**/venv3111/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Flutter generated files
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/build/
+**/ephemeral/
+**/.plugin_symlinks/
+
+# Android generated files
+.gradle/
+.kotlin/
+local.properties
+
+# IDE and operating system files
+.idea/
+.vscode/
+.DS_Store
+*.iml
+
+# Temporary files and uploaded user data
+tmp/
+backend/uploads/
+uploads/
+
+# Large NLP models and local datasets
+ai/model/civic_nlp_model/
+ai/demo/model/civic_nlp_model/
+ai/models/
+ai/datasets/
+ai/nlp/dataset/
+

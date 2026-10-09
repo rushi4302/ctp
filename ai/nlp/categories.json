@@ -1,0 +1,70 @@
+{
+    "Pothole/Road Damage": [
+      "pothole",
+      "road damage",
+      "broken road",
+      "damaged road",
+      "road crack",
+      "crack on road",
+      "hole in road",
+      "khadda",
+      "gadda",
+      "road is broken"
+    ],
+  
+    "Garbage": [
+      "garbage",
+      "trash",
+      "waste",
+      "dirty",
+      "litter",
+      "dump",
+      "rubbish",
+      "kachra",
+      "kuda",
+      "dustbin overflow",
+      "waste material"
+    ],
+  
+    "Streetlight Issue": [
+      "streetlight",
+      "street light",
+      "lamp",
+      "light not working",
+      "no light",
+      "dark road",
+      "bulb not working",
+      "electric pole light",
+      "street lamp"
+    ],
+  
+    "Water Leakage": [
+      "water leakage",
+      "leak",
+      "pipe burst",
+      "water flowing",
+      "water coming",
+      "pipeline broken",
+      "water wastage"
+    ],
+  
+    "Drainage Problem": [
+      "drain",
+      "drainage",
+      "sewer",
+      "blocked drain",
+      "overflow",
+      "gutter",
+      "nali",
+      "dirty water"
+    ],
+  
+    "Traffic Issue": [
+      "traffic",
+      "signal",
+      "traffic jam",
+      "congestion",
+      "vehicle problem",
+      "road block"
+    ]
+  }
