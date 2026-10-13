@@ -50,6 +50,18 @@ async def test_reject_invalid_mime():
     assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
 
 
+@pytest.mark.asyncio
+async def test_rejects_non_image_bytes_with_image_filename():
+    upload = UploadFile(
+        filename="fake.jpg",
+        file=io.BytesIO(b"this is not a jpeg image"),
+        headers={"content-type": "image/jpeg"},
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await StorageService.save_upload(upload)
+    assert exc_info.value.status_code == status.HTTP_400_BAD_REQUEST
+
+
 def test_sanitize_filename_prevents_traversal():
     dangerous = "../../etc/passwd"
     sanitized = StorageService.sanitize_filename(dangerous)

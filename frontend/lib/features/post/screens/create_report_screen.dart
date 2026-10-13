@@ -1,9 +1,9 @@
 import 'dart:typed_data';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/services/location_service.dart';
 import '../../../core/services/report_service.dart';
@@ -22,17 +22,21 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
   final _formKey = GlobalKey<FormState>();
   final _descriptionController = TextEditingController();
   final _reportService = ReportService();
+  final _locationService = LocationService();
 
   XFile? _capturedFile;
   Uint8List? _capturedImageBytes;
   DateTime? _captureTimestamp;
   CivicLocationData? _civicLocation;
 
-  double? _latitude;
-  double? _longitude;
   String? _locationError;
 
   bool _isSubmitting = false;
+  bool _isResolvingLocation = false;
+  bool _isSelectingPhoto = false;
+  bool _isAnalyzing = false;
+  String? _selectedCategory;
+  Map<String, dynamic>? _aiAnalysis;
 
   @override
   void initState() {
@@ -66,8 +70,6 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
           _capturedImageBytes = result.bytes;
           _captureTimestamp = result.captureTimestamp;
           _civicLocation = result.location;
-          _latitude = result.location.latitude;
-          _longitude = result.location.longitude;
           _locationError = null;
         });
       }
@@ -80,6 +82,127 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
           ),
         );
       }
+    }
+  }
+
+  Future<void> _editLocation() async {
+    final current = _civicLocation;
+    final latitude = TextEditingController(text: current?.latitude.toStringAsFixed(6) ?? '');
+    final longitude = TextEditingController(text: current?.longitude.toStringAsFixed(6) ?? '');
+    final values = await showDialog<(double, double)>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Review report location'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Adjust the coordinates if the photo location is inaccurate.'),
+          const SizedBox(height: 16),
+          TextField(controller: latitude, keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true), decoration: const InputDecoration(labelText: 'Latitude')),
+          TextField(controller: longitude, keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true), decoration: const InputDecoration(labelText: 'Longitude')),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () {
+              final lat = double.tryParse(latitude.text.trim());
+              final lon = double.tryParse(longitude.text.trim());
+              if (lat == null || lon == null || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Enter valid latitude and longitude.')));
+                return;
+              }
+              Navigator.pop(dialogContext, (lat, lon));
+            },
+            child: const Text('Use location'),
+          ),
+        ],
+      ),
+    );
+    latitude.dispose();
+    longitude.dispose();
+    if (values == null || !mounted) return;
+    setState(() => _isResolvingLocation = true);
+    try {
+      final resolved = await _locationService.reverseGeocode(
+        values.$1,
+        values.$2,
+        accuracy: current?.accuracy ?? 0,
+        timestamp: current?.timestamp ?? DateTime.now(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _civicLocation = resolved;
+        _locationError = null;
+        _isResolvingLocation = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _civicLocation = current?.copyWith(latitude: values.$1, longitude: values.$2, address: '${values.$1.toStringAsFixed(6)}, ${values.$2.toStringAsFixed(6)}') ??
+            CivicLocationData(
+              latitude: values.$1,
+              longitude: values.$2,
+              accuracy: 0,
+              timestamp: DateTime.now(),
+              address: '${values.$1.toStringAsFixed(6)}, ${values.$2.toStringAsFixed(6)}',
+            );
+        _locationError = 'Address lookup unavailable; the selected coordinates were kept.';
+        _isResolvingLocation = false;
+      });
+    }
+  }
+
+  Future<void> _pickFromGallery() async {
+    try {
+      final image = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 85);
+      if (image == null || !mounted) return;
+      setState(() => _isSelectingPhoto = true);
+      final bytes = await image.readAsBytes();
+      DateTime capturedAt;
+      try {
+        capturedAt = await image.lastModified();
+      } catch (_) {
+        capturedAt = DateTime.now();
+      }
+      CivicLocationData? location;
+      String? locationError;
+      try {
+        location = await _locationService.getCurrentLocation();
+      } catch (_) {
+        locationError = 'Location unavailable. Set the issue coordinates before submitting.';
+      }
+      if (!mounted) return;
+      setState(() {
+        _capturedFile = image;
+        _capturedImageBytes = bytes;
+        _captureTimestamp = capturedAt;
+        _civicLocation = location;
+        _locationError = locationError;
+        _isSelectingPhoto = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isSelectingPhoto = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not select photo: $error')));
+    }
+  }
+
+  Future<void> _analyzeWithAI() async {
+    final image = _capturedImageBytes;
+    if (image == null) return;
+    setState(() => _isAnalyzing = true);
+    try {
+      final result = await _reportService.analyzeAI(
+        text: _descriptionController.text.trim(),
+        imageBytes: image,
+      );
+      if (!mounted) return;
+      setState(() {
+        _aiAnalysis = result;
+        _isAnalyzing = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isAnalyzing = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('AI analysis unavailable: $error')));
     }
   }
 
@@ -97,7 +220,7 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
     }
 
     // 2. Location validation
-    if (_latitude == null || _longitude == null) {
+    if (_civicLocation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(_locationError ?? 'Location required. Please wait for GPS or retake photo.'),
@@ -121,16 +244,17 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
       final report = await _reportService.createReport(
         title: autoTitle,
         description: description,
-        latitude: _latitude!,
-        longitude: _longitude!,
-        locationAccuracy: _civicLocation?.accuracy,
+        latitude: _civicLocation!.latitude,
+        longitude: _civicLocation!.longitude,
+        category: _selectedCategory,
+        locationAccuracy: _civicLocation!.accuracy,
         captureTimestamp: _captureTimestamp,
-        address: _civicLocation?.displayAddress,
-        locality: _civicLocation?.locality ?? _civicLocation?.subLocality,
-        city: _civicLocation?.city,
-        district: _civicLocation?.district,
-        state: _civicLocation?.state,
-        postalCode: _civicLocation?.postalCode,
+        address: _civicLocation!.displayAddress,
+        locality: _civicLocation!.locality ?? _civicLocation!.subLocality,
+        city: _civicLocation!.city,
+        district: _civicLocation!.district,
+        state: _civicLocation!.state,
+        postalCode: _civicLocation!.postalCode,
         imageBytes: _capturedImageBytes,
         imageName: _capturedFile?.name ?? 'captured_issue.jpg',
       );
@@ -183,14 +307,49 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
               const SizedBox(height: 16),
 
               // 2. Structured Verification Details Card (When photo is captured)
-              if (_captureTimestamp != null && _civicLocation != null) ...[
-                _buildVerificationCard(),
+              if (_captureTimestamp != null) ...[
+                if (_civicLocation != null) _buildVerificationCard(),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: _isResolvingLocation ? null : _editLocation,
+                    icon: _isResolvingLocation
+                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.edit_location_alt_outlined),
+                    label: Text(_isResolvingLocation ? 'Resolving location…' : _civicLocation == null ? 'Set issue location' : 'Edit location'),
+                  ),
+                ),
                 const SizedBox(height: 20),
               ],
 
               // 3. Description Field
               _buildDescriptionField(),
-              const SizedBox(height: 28),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String?>(
+                value: _selectedCategory,
+                decoration: const InputDecoration(labelText: 'Issue category', border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem<String?>(value: null, child: Text('Use AI suggestion when available')),
+                  DropdownMenuItem<String?>(value: 'Pothole/Road Damage', child: Text('Pothole / road damage')),
+                  DropdownMenuItem<String?>(value: 'Garbage', child: Text('Garbage')),
+                  DropdownMenuItem<String?>(value: 'Water Leakage', child: Text('Water leakage')),
+                  DropdownMenuItem<String?>(value: 'Streetlight Issue', child: Text('Streetlight issue')),
+                  DropdownMenuItem<String?>(value: 'Drainage Problem', child: Text('Drainage problem')),
+                  DropdownMenuItem<String?>(value: 'Traffic Issue', child: Text('Traffic issue')),
+                  DropdownMenuItem<String?>(value: 'Other', child: Text('Other')),
+                ],
+                onChanged: (value) => setState(() => _selectedCategory = value),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: _capturedImageBytes == null || _isAnalyzing ? null : _analyzeWithAI,
+                icon: _isAnalyzing
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.auto_awesome_outlined),
+                label: Text(_isAnalyzing ? 'Analyzing image…' : 'Analyze photo with AI'),
+              ),
+              if (_aiAnalysis != null) _buildAiResult(_aiAnalysis!),
+              const SizedBox(height: 16),
 
               // 4. Submit Button
               _buildSubmitButton(),
@@ -282,9 +441,13 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
                 ),
               ),
               const SizedBox(height: 4),
-              const Text(
-                'Camera only (Gallery disabled for verification)',
-                style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _isSelectingPhoto ? null : _pickFromGallery,
+                icon: _isSelectingPhoto
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Icon(Icons.photo_library_outlined),
+                label: const Text('Choose from gallery'),
               ),
             ],
           ),
@@ -376,19 +539,21 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
           _buildInfoRow(
             icon: Icons.holiday_village_outlined,
             iconColor: Colors.orange.shade800,
-            label: '🏘️ Area',
-            value: area ?? 'Unknown Area',
+            label: area != null && area.toLowerCase() == city?.toLowerCase()
+                ? '🏘️ Area / City'
+                : '🏘️ Area',
+            value: area ?? 'Area not detected',
           ),
           const SizedBox(height: 8),
-
-          // City
-          _buildInfoRow(
-            icon: Icons.location_city,
-            iconColor: Colors.teal,
-            label: '🏙️ City',
-            value: city ?? 'Unknown City',
-          ),
-          const SizedBox(height: 8),
+          if (city != null && (area == null || area.toLowerCase() != city.toLowerCase())) ...[
+            _buildInfoRow(
+              icon: Icons.location_city,
+              iconColor: Colors.teal,
+              label: '🏙️ City',
+              value: city,
+            ),
+            const SizedBox(height: 8),
+          ],
 
           // Coordinates
           _buildInfoRow(
@@ -455,6 +620,29 @@ class _CreateReportScreenState extends ConsumerState<CreateReportScreen> {
         }
         return null;
       },
+    );
+  }
+
+  Widget _buildAiResult(Map<String, dynamic> result) {
+    final category = result['suggested_category'] as String?;
+    final confidence = (result['suggested_confidence'] as num?)?.toDouble();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(category == null ? 'No AI prediction available' : 'AI prediction: $category', style: const TextStyle(fontWeight: FontWeight.bold)),
+          if (confidence != null) Text('Model confidence ${(confidence * 100).toStringAsFixed(1)}% (not model accuracy).'),
+          const Text('This is an unverified suggestion; review the category before submitting.'),
+          if (category != null)
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => setState(() => _selectedCategory = category),
+                child: const Text('Use suggestion'),
+              ),
+            ),
+        ]),
+      ),
     );
   }
 

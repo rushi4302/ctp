@@ -1,24 +1,10 @@
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
+from fastapi import Depends, HTTPException
 from sqlalchemy import text
 
 from app.api.router import router
 from app.core.config import settings
 from app.database.session import engine
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
-        print("✅ Database Connected Successfully!")
-    except Exception as e:
-        print("❌ Database Connection Failed!")
-        print(e)
-
-    yield
 
 
 import os
@@ -28,13 +14,12 @@ from fastapi.staticfiles import StaticFiles
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    lifespan=lifespan,
 )
 
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins if settings.cors_origins else ["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,6 +35,18 @@ app.include_router(router)
 @app.get("/")
 def root():
     return {
-        "message": "Backend is running!",
-        "database": "Connected",
+        "message": "Civic Intelligence API is running",
+        "docs": "/docs",
     }
+
+
+@app.get("/health")
+def health():
+    try:
+        with engine.connect() as connection:
+            database_name = connection.execute(text("SELECT current_database()")).scalar_one()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+    if database_name != "civic_db_test":
+        raise HTTPException(status_code=503, detail="Backend database safety check failed")
+    return {"status": "ok", "database": database_name}

@@ -18,6 +18,7 @@ from sqlalchemy import func, or_
 
 from app.core.constants import (
     CivicIssueStatus,
+    LocationValidationStatus,
     ModerationStatus,
     ReportSeverity,
     ReportStatus,
@@ -51,6 +52,37 @@ STOP_WORDS = {
 
 
 class CivicIssueService:
+    @staticmethod
+    def _sync_linked_report_statuses(
+        db: Session,
+        issue: CivicIssue,
+        report_status: str,
+        changed_by_id: Optional[int],
+        now: datetime,
+        comment: str,
+    ) -> None:
+        """Keep citizen report status and audit history aligned with its issue."""
+        for report in issue.reports:
+            if (
+                report.moderation_status != ModerationStatus.ACTIVE.value
+                or report.status == report_status
+                or report.status in [ReportStatus.REJECTED.value, ReportStatus.FLAGGED.value]
+            ):
+                continue
+            previous_status = report.status
+            report.status = report_status
+            report.updated_at = now
+            db.add(
+                ReportStatusLog(
+                    report_id=report.id,
+                    changed_by_id=changed_by_id,
+                    previous_status=previous_status,
+                    new_status=report_status,
+                    comment=comment,
+                    created_at=now,
+                )
+            )
+
     @staticmethod
     def _tokenize(text: str) -> set:
         """Tokenize text into lowercase alphanumeric words, filtering out short/stopwords."""
@@ -343,7 +375,6 @@ class CivicIssueService:
         if not issue:
             raise HTTPException(status_code=404, detail="Civic Issue not found.")
 
-
         if user_role in [UserRole.FIELD_WORKER, UserRole.CONTRACTOR]:
             if issue.assigned_worker_id != user.id:
                 raise HTTPException(
@@ -351,15 +382,44 @@ class CivicIssueService:
                     detail="Field workers can only update civic issues assigned to them.",
                 )
             allowed_worker_transitions = {
-                CivicIssueStatus.ASSIGNED.value: [CivicIssueStatus.IN_PROGRESS.value],
-                CivicIssueStatus.IN_PROGRESS.value: [CivicIssueStatus.RESOLVED.value],
+                CivicIssueStatus.ASSIGNED.value: {CivicIssueStatus.IN_PROGRESS.value},
+                CivicIssueStatus.IN_PROGRESS.value: {CivicIssueStatus.RESOLVED.value},
             }
-            if new_status not in allowed_worker_transitions.get(issue.status, []):
+            if new_status not in allowed_worker_transitions.get(issue.status, set()):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=f"Workers cannot transition issue from {issue.status} to {new_status}.",
                 )
 
+        allowed_transitions = {
+            CivicIssueStatus.PENDING.value: {
+                CivicIssueStatus.ASSIGNED.value,
+                CivicIssueStatus.IN_PROGRESS.value,
+                CivicIssueStatus.RESOLVED.value,
+                CivicIssueStatus.CLOSED.value,
+            },
+            CivicIssueStatus.ASSIGNED.value: {
+                CivicIssueStatus.IN_PROGRESS.value,
+                CivicIssueStatus.RESOLVED.value,
+                CivicIssueStatus.CLOSED.value,
+            },
+            CivicIssueStatus.IN_PROGRESS.value: {
+                CivicIssueStatus.RESOLVED.value,
+                CivicIssueStatus.CLOSED.value,
+            },
+            CivicIssueStatus.RESOLVED.value: {
+                CivicIssueStatus.IN_PROGRESS.value,
+                CivicIssueStatus.CLOSED.value,
+            },
+            CivicIssueStatus.CLOSED.value: {CivicIssueStatus.PENDING.value},
+        }
+        if new_status == issue.status:
+            return issue
+        if new_status not in allowed_transitions.get(issue.status, set()):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot transition civic issue from {issue.status} to {new_status}.",
+            )
         now = datetime.now(timezone.utc)
         prev_status = issue.status
         issue.status = new_status
@@ -368,12 +428,27 @@ class CivicIssueService:
         if new_status == CivicIssueStatus.RESOLVED.value and not issue.resolved_at:
             issue.resolved_at = now
             # Synchronize linked active reports to RESOLVED
-            for r in issue.reports:
-                if r.moderation_status == ModerationStatus.ACTIVE.value:
-                    r.status = ReportStatus.RESOLVED.value
-                    r.updated_at = now
         elif new_status == CivicIssueStatus.CLOSED.value and not issue.closed_at:
             issue.closed_at = now
+        elif new_status in [CivicIssueStatus.PENDING.value, CivicIssueStatus.IN_PROGRESS.value]:
+            issue.resolved_at = None
+            issue.closed_at = None
+
+        linked_report_status = {
+            CivicIssueStatus.PENDING.value: ReportStatus.SUBMITTED.value,
+            CivicIssueStatus.ASSIGNED.value: ReportStatus.VERIFIED.value,
+            CivicIssueStatus.IN_PROGRESS.value: ReportStatus.IN_PROGRESS.value,
+            CivicIssueStatus.RESOLVED.value: ReportStatus.RESOLVED.value,
+        }.get(new_status)
+        if linked_report_status:
+            cls._sync_linked_report_statuses(
+                db,
+                issue,
+                linked_report_status,
+                user.id,
+                now,
+                comment or f"Report status synchronized with civic issue transition to {new_status}.",
+            )
 
         log = CivicIssueStatusLog(
             civic_issue_id=issue.id,
@@ -393,13 +468,13 @@ class CivicIssueService:
         cls,
         db: Session,
         issue_id: int,
-        worker_id: int,
+        worker_id: Optional[int],
         authority: User,
         department_id: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> CivicIssue:
         """
-        Assigns a Field Worker to a Civic Issue. Allowed for Municipality and Admin.
+        Assigns a department and optionally a Field Worker to a Civic Issue.
         """
         if authority.role not in [UserRole.ADMIN, UserRole.MUNICIPALITY]:
             raise HTTPException(
@@ -411,23 +486,55 @@ class CivicIssueService:
         if not issue:
             raise HTTPException(status_code=404, detail="Civic Issue not found.")
 
-        worker = db.query(User).filter(User.id == worker_id).first()
-        if not worker:
-            raise HTTPException(status_code=404, detail="Assigned worker user not found.")
+        department = department_id.strip() if department_id and department_id.strip() else None
+        if worker_id is None and department is None:
+            raise HTTPException(status_code=422, detail="Provide a department or a field worker.")
+        worker = None
+        if worker_id is not None:
+            worker = db.query(User).filter(User.id == worker_id).first()
+            if not worker:
+                raise HTTPException(status_code=404, detail="Assigned worker user not found.")
+            if worker.role != UserRole.FIELD_WORKER:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Only registered field workers can be assigned to civic issues.",
+                )
+        if issue.status not in [CivicIssueStatus.PENDING.value, CivicIssueStatus.ASSIGNED.value]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot assign a worker while the civic issue is {issue.status}.",
+            )
 
         now = datetime.now(timezone.utc)
         prev_status = issue.status
-        issue.assigned_worker_id = worker.id
-        if department_id:
-            issue.assigned_department_id = department_id.strip()
+        if worker is not None:
+            issue.assigned_worker_id = worker.id
+        if department is not None:
+            issue.assigned_department_id = department
+            for linked_report in issue.reports:
+                if linked_report.moderation_status == ModerationStatus.ACTIVE.value:
+                    linked_report.assigned_department_id = department
 
         # If issue was PENDING, automatically advance to ASSIGNED
         if issue.status == CivicIssueStatus.PENDING.value:
             issue.status = CivicIssueStatus.ASSIGNED.value
+            cls._sync_linked_report_statuses(
+                db,
+                issue,
+                ReportStatus.VERIFIED.value,
+                authority.id,
+                now,
+                "Report status synchronized with administrative assignment.",
+            )
 
         issue.updated_at = now
 
-        comment = f"Assigned to {worker.full_name} ({worker.email})."
+        assignments = []
+        if department:
+            assignments.append(f"department {department}")
+        if worker:
+            assignments.append(f"{worker.full_name} ({worker.email})")
+        comment = f"Assigned to {' and '.join(assignments)}."
         if notes:
             comment += f" Notes: {notes}"
 
@@ -529,6 +636,12 @@ class CivicIssueService:
                 detail="Workers can only resolve tasks assigned to them.",
             )
 
+        if issue.status in [CivicIssueStatus.RESOLVED.value, CivicIssueStatus.CLOSED.value]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot resolve a civic issue while it is {issue.status}.",
+            )
+
         now = datetime.now(timezone.utc)
         prev_status = issue.status
         issue.status = CivicIssueStatus.RESOLVED.value
@@ -553,11 +666,14 @@ class CivicIssueService:
         issue.resolved_at = now
         issue.updated_at = now
 
-        # Also update linked active reports
-        for r in issue.reports:
-            if r.moderation_status == ModerationStatus.ACTIVE.value:
-                r.status = ReportStatus.RESOLVED.value
-                r.updated_at = now
+        cls._sync_linked_report_statuses(
+            db,
+            issue,
+            ReportStatus.RESOLVED.value,
+            user.id,
+            now,
+            "Report status synchronized with civic issue resolution.",
+        )
 
         log = CivicIssueStatusLog(
             civic_issue_id=issue.id,
@@ -567,9 +683,13 @@ class CivicIssueService:
             comment=f"Issue resolved. Evidence/Notes: {resolution_notes}",
             created_at=now,
         )
-        db.add(log)
-        db.commit()
-        db.refresh(issue)
+        try:
+            db.add(log)
+            db.commit()
+            db.refresh(issue)
+        except Exception:
+            db.rollback()
+            raise
         return issue
 
     @classmethod
@@ -605,10 +725,16 @@ class CivicIssueService:
         issue.status = CivicIssueStatus.PENDING.value
         issue.updated_at = now
 
-        for r in issue.reports:
-            if r.moderation_status == ModerationStatus.ACTIVE.value:
-                r.status = ReportStatus.IN_REVIEW.value
-                r.updated_at = now
+        issue.resolved_at = None
+        issue.closed_at = None
+        cls._sync_linked_report_statuses(
+            db,
+            issue,
+            ReportStatus.SUBMITTED.value,
+            user.id,
+            now,
+            "Report resubmitted after citizen requested the issue be reopened.",
+        )
 
         log = CivicIssueStatusLog(
             civic_issue_id=issue.id,
@@ -706,7 +832,12 @@ class CivicIssueService:
         return report
 
     @classmethod
-    def get_transparency_statistics(cls, db: Session, ward: Optional[str] = None) -> Dict[str, Any]:
+    def get_transparency_statistics(
+        cls,
+        db: Session,
+        ward: Optional[str] = None,
+        locality: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Public-safe civic transparency statistics.
         Excludes rejected/hidden reports and maintains distinction between
@@ -714,11 +845,14 @@ class CivicIssueService:
         """
         # Active reports only
         rep_query = db.query(Report).filter(Report.moderation_status == ModerationStatus.ACTIVE.value)
-        issue_query = db.query(CivicIssue)
+        issue_query = db.query(CivicIssue).filter(CivicIssue.report_count > 0)
 
         if ward and ward.strip():
             rep_query = rep_query.filter(Report.ward == ward.strip())
             issue_query = issue_query.filter(CivicIssue.ward == ward.strip())
+        if locality and locality.strip():
+            rep_query = rep_query.filter(Report.locality == locality.strip())
+            issue_query = issue_query.filter(CivicIssue.locality == locality.strip())
 
         total_reports = rep_query.count()
         total_issues = issue_query.count()
@@ -734,21 +868,20 @@ class CivicIssueService:
         ).count()
 
         # Average resolution time in hours
-        resolved_with_times = (
-            issue_query.filter(
-                CivicIssue.resolved_at.isnot(None),
-                CivicIssue.created_at.isnot(None),
-            )
-            .all()
-        )
+        resolved_with_times = issue_query.filter(
+            CivicIssue.resolved_at.isnot(None),
+            CivicIssue.created_at.isnot(None),
+        ).all()
+        resolution_durations = [
+            (issue.resolved_at - issue.created_at).total_seconds()
+            for issue in resolved_with_times
+            if issue.resolved_at and issue.created_at and issue.resolved_at >= issue.created_at
+        ]
         avg_res_time_hours: Optional[float] = None
-        if resolved_with_times:
-            total_seconds = sum(
-                (issue.resolved_at - issue.created_at).total_seconds()
-                for issue in resolved_with_times
-                if issue.resolved_at and issue.created_at and issue.resolved_at >= issue.created_at
+        if resolution_durations:
+            avg_res_time_hours = round(
+                sum(resolution_durations) / (len(resolution_durations) * 3600.0), 1
             )
-            avg_res_time_hours = round(total_seconds / (len(resolved_with_times) * 3600.0), 1)
 
         # Category distribution of issues
         category_rows = (
@@ -758,6 +891,13 @@ class CivicIssueService:
         )
         category_breakdown = {cat: count for cat, count in category_rows}
 
+        severity_rows = (
+            issue_query.with_entities(CivicIssue.severity, func.count(CivicIssue.id))
+            .group_by(CivicIssue.severity)
+            .all()
+        )
+        severity_breakdown = {severity: count for severity, count in severity_rows}
+
         # Ward distribution
         ward_rows = (
             issue_query.filter(CivicIssue.ward.isnot(None))
@@ -766,6 +906,14 @@ class CivicIssueService:
             .all()
         )
         ward_breakdown = {w: count for w, count in ward_rows}
+
+        locality_rows = (
+            issue_query.filter(CivicIssue.locality.isnot(None), CivicIssue.locality != "")
+            .with_entities(CivicIssue.locality, func.count(CivicIssue.id))
+            .group_by(CivicIssue.locality)
+            .all()
+        )
+        locality_breakdown = {locality: count for locality, count in locality_rows}
 
         # Multi-report duplicate count
         multi_report_issues = issue_query.filter(CivicIssue.report_count > 1).count()
@@ -779,15 +927,26 @@ class CivicIssueService:
             "resolved_issues": resolved_issues,
             "closed_issues": closed_issues,
             "open_issues": pending_issues + assigned_issues + in_progress_issues,
+            "resolution_rate": round(((resolved_issues + closed_issues) / total_issues) * 100.0, 1)
+            if total_issues
+            else 0.0,
             "high_critical_issues": high_critical,
             "average_resolution_hours": avg_res_time_hours,
             "category_distribution": category_breakdown,
+            "severity_distribution": severity_breakdown,
+            "locality_distribution": locality_breakdown,
             "ward_distribution": ward_breakdown,
             "multi_report_issues_count": multi_report_issues,
+            "data_notice": "Development/test database. Metrics may include synthetic test records and are not official municipal data.",
         }
 
     @classmethod
-    def calculate_civic_health_score(cls, db: Session, ward: Optional[str] = None) -> Dict[str, Any]:
+    def calculate_civic_health_score(
+        cls,
+        db: Session,
+        ward: Optional[str] = None,
+        locality: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Explainable Civic Health Score (0 - 100).
         Formula:
@@ -797,25 +956,31 @@ class CivicIssueService:
             + (Severity Health * 0.25)
             + (Pending Age Health * 0.15)
             + (Recurrence Health * 0.10)
+        Component normalization: unresolved critical issues cost 25/total points,
+        unresolved high issues cost 10/total points, stale pending issues are
+        measured as a share of all active issues, and repeat submissions are
+        measured as a share of issues. Fewer than five active issues returns
+        INSUFFICIENT_DATA instead of a numeric score.
         """
-        issue_query = db.query(CivicIssue)
+        issue_query = db.query(CivicIssue).filter(CivicIssue.report_count > 0)
         if ward and ward.strip():
             issue_query = issue_query.filter(CivicIssue.ward == ward.strip())
+        if locality and locality.strip():
+            issue_query = issue_query.filter(CivicIssue.locality == locality.strip())
 
         total_issues = issue_query.count()
-        if total_issues == 0:
+        if total_issues < 5:
             return {
-                "overall_score": 100.0,
-                "rating": "EXCELLENT",
+                "overall_score": None,
+                "rating": "INSUFFICIENT_DATA",
                 "ward": ward,
-                "total_issues_analyzed": 0,
-                "components": {
-                    "resolution_score": {"score": 100.0, "weight": 0.30, "description": "No civic issues reported."},
-                    "response_score": {"score": 100.0, "weight": 0.20, "description": "All issues handled."},
-                    "severity_health": {"score": 100.0, "weight": 0.25, "description": "No critical/high issues."},
-                    "pending_age_health": {"score": 100.0, "weight": 0.15, "description": "No stale pending issues."},
-                    "recurrence_health": {"score": 100.0, "weight": 0.10, "description": "Optimal civic recurrence."},
-                },
+                "locality": locality,
+                "total_issues_analyzed": total_issues,
+                "components": {},
+                "data_notice": (
+                    f"Insufficient data for a Civic Health Index: {total_issues} active issues; "
+                    "at least 5 are required. Development/test records are not official municipal data."
+                ),
             }
 
         resolved_count = issue_query.filter(
@@ -848,7 +1013,9 @@ class CivicIssueService:
         response_score = round((handled_count / total_issues) * 100.0, 1)
 
         # 3. Severity Health (0 - 100): 25% (Penalizes unresolved high/critical issues)
-        severity_penalty = (unresolved_critical * 25.0) + (unresolved_high * 10.0)
+        severity_penalty = (
+            ((unresolved_critical * 25.0) + (unresolved_high * 10.0)) / total_issues
+        )
         severity_health = round(max(0.0, min(100.0, 100.0 - severity_penalty)), 1)
 
         # 4. Pending Age Health (0 - 100): 15% (Penalizes pending issues older than 7 days)
@@ -889,6 +1056,7 @@ class CivicIssueService:
             "overall_score": overall_score,
             "rating": rating,
             "ward": ward,
+            "locality": locality,
             "total_issues_analyzed": total_issues,
             "components": {
                 "resolution_score": {
@@ -914,7 +1082,8 @@ class CivicIssueService:
                 "recurrence_health": {
                     "score": recurrence_health,
                     "weight": 0.10,
-                    "description": f"{multi_reports} issues with multiple citizen duplicate submissions.",
+                "description": f"{multi_reports}/{total_issues} issues have multiple linked citizen submissions.",
                 },
             },
+            "data_notice": "Development/test database. Metrics may include synthetic test records and are not official municipal data.",
         }

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.constants import CivicIssueStatus, ReportSeverity
-from app.schemas.user import UserResponse
+from app.schemas.user import UserResponse, UserSummaryResponse
 
 
 class CivicIssueStatusLogResponse(BaseModel):
@@ -19,13 +19,14 @@ class CivicIssueStatusLogResponse(BaseModel):
     new_status: str
     comment: Optional[str] = None
     created_at: datetime
-    changed_by: Optional[UserResponse] = None
+    changed_by: Optional[UserSummaryResponse] = None
 
     model_config = {"from_attributes": True}
 
 
 class CivicIssueResponse(BaseModel):
     id: int
+    is_synthetic: bool = False
     title: str
     description: str
     category: str
@@ -43,7 +44,7 @@ class CivicIssueResponse(BaseModel):
     report_count: int = 1
     assigned_department_id: Optional[str] = None
     assigned_worker_id: Optional[int] = None
-    assigned_worker: Optional[UserResponse] = None
+    assigned_worker: Optional[UserSummaryResponse] = None
     ai_category: Optional[str] = None
     ai_confidence: Optional[float] = None
     resolution_notes: Optional[str] = None
@@ -77,7 +78,9 @@ class CivicIssueStatusUpdate(BaseModel):
 
 
 class CivicIssueAssignWorker(BaseModel):
-    worker_id: int
+    # Department-only assignment is supported for the current admin workflow;
+    # worker assignment remains available for deployments that use field staff.
+    worker_id: Optional[int] = None
     department_id: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=500)
 
@@ -105,11 +108,13 @@ class HealthScoreComponent(BaseModel):
 
 
 class CivicHealthScoreResponse(BaseModel):
-    overall_score: float
+    overall_score: Optional[float] = None
     rating: str
     ward: Optional[str] = None
+    locality: Optional[str] = None
     total_issues_analyzed: int
     components: Dict[str, HealthScoreComponent]
+    data_notice: str
 
 
 class TransparencyStatsResponse(BaseModel):
@@ -121,11 +126,15 @@ class TransparencyStatsResponse(BaseModel):
     resolved_issues: int
     closed_issues: int
     open_issues: int
+    resolution_rate: float
     high_critical_issues: int
     average_resolution_hours: Optional[float] = None
     category_distribution: Dict[str, int]
+    severity_distribution: Dict[str, int]
+    locality_distribution: Dict[str, int]
     ward_distribution: Dict[str, int]
     multi_report_issues_count: int
+    data_notice: str
 
 
 class PublicIssueMapPoint(BaseModel):
@@ -138,3 +147,4 @@ class PublicIssueMapPoint(BaseModel):
     locality: Optional[str] = None
     ward: Optional[str] = None
     report_count: int
+    is_synthetic: bool = False

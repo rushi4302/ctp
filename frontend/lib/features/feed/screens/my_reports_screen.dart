@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../providers/report_provider.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 
 class MyReportsScreen extends ConsumerStatefulWidget {
   const MyReportsScreen({super.key});
@@ -66,7 +67,7 @@ class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
                         child: ListTile(
                           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                           title: Text(
-                            report.title,
+                            presentComplaintTitle(report.title, isSynthetic: report.isSynthetic),
                             style: const TextStyle(fontWeight: FontWeight.bold),
                           ),
                           subtitle: Column(
@@ -74,6 +75,11 @@ class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
                             children: [
                               const SizedBox(height: 4),
                               Text(report.category, style: const TextStyle(color: AppColors.primary, fontSize: 12)),
+                              if (report.isSynthetic)
+                                const Text(
+                                  'Demonstration record',
+                                  style: TextStyle(color: Colors.deepOrange, fontSize: 11),
+                                ),
                               const SizedBox(height: 4),
                               Text(
                                 '${report.createdAt.day}/${report.createdAt.month}/${report.createdAt.year}',
@@ -88,7 +94,7 @@ class _MyReportsScreenState extends ConsumerState<MyReportsScreen> {
                               borderRadius: BorderRadius.circular(6),
                             ),
                             child: Text(
-                              report.status,
+                                humanizeStatus(report.status),
                               style: TextStyle(
                                 color: statusColor,
                                 fontWeight: FontWeight.bold,

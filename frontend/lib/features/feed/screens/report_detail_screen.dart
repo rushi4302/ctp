@@ -9,6 +9,7 @@ import '../../../core/services/civic_issue_service.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../providers/report_provider.dart';
 import '../../../shared/models/report_model.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 import '../../maps/screens/single_location_map_screen.dart';
 import '../../municipality/screens/civic_issue_detail_screen.dart';
 
@@ -28,6 +29,7 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
   bool _isLoading = true;
   String? _error;
   bool _isPostingComment = false;
+  bool _isDeleting = false;
 
   @override
   void initState() {
@@ -90,6 +92,45 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
     }
   }
 
+  Future<void> _deleteReport() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete complaint?'),
+        content: const Text('This permanently removes the complaint and its comments, votes, status history, and attached images.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || _report == null) return;
+
+    setState(() => _isDeleting = true);
+    try {
+      await _reportService.deleteReport(_report!.id);
+      ref.read(reportListProvider.notifier).fetchReports();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Complaint deleted.')),
+      );
+      Navigator.of(context).pop(true);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _isDeleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete complaint: $error')),
+      );
+    }
+  }
+
   void _showStatusDialog() {
     String selectedStatus = _report!.status;
     final commentCtrl = TextEditingController();
@@ -109,12 +150,12 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
                   value: selectedStatus,
                   decoration: const InputDecoration(labelText: 'Status'),
                   items: const [
-                    DropdownMenuItem(value: 'SUBMITTED', child: Text('SUBMITTED')),
-                    DropdownMenuItem(value: 'VERIFIED', child: Text('VERIFIED')),
-                    DropdownMenuItem(value: 'IN_PROGRESS', child: Text('IN_PROGRESS')),
-                    DropdownMenuItem(value: 'RESOLVED', child: Text('RESOLVED')),
-                    DropdownMenuItem(value: 'REJECTED', child: Text('REJECTED')),
-                    DropdownMenuItem(value: 'FLAGGED', child: Text('FLAGGED')),
+                    DropdownMenuItem(value: 'SUBMITTED', child: Text('Submitted')),
+                    DropdownMenuItem(value: 'VERIFIED', child: Text('Verified')),
+                    DropdownMenuItem(value: 'IN_PROGRESS', child: Text('In Progress')),
+                    DropdownMenuItem(value: 'RESOLVED', child: Text('Resolved')),
+                    DropdownMenuItem(value: 'REJECTED', child: Text('Rejected')),
+                    DropdownMenuItem(value: 'FLAGGED', child: Text('Flagged')),
                   ],
                   onChanged: (val) {
                     if (val != null) setDialogState(() => selectedStatus = val);
@@ -179,6 +220,11 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
     final authState = ref.watch(authProvider);
     final user = authState.user;
     final isAuthority = user != null && user.isMunicipality;
+    final canDelete = user != null &&
+        (user.isAdmin ||
+            (user.isCitizen &&
+                user.id == _report?.reporterId &&
+                _report?.status.toUpperCase() == 'SUBMITTED'));
 
     if (_isLoading) {
       return Scaffold(
@@ -209,10 +255,18 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
-        title: Text(report.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: Text(presentComplaintTitle(report.title, isSynthetic: report.isSynthetic), maxLines: 1, overflow: TextOverflow.ellipsis),
         backgroundColor: AppColors.primary,
         foregroundColor: Colors.white,
         actions: [
+          if (canDelete)
+            IconButton(
+              icon: _isDeleting
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                  : const Icon(Icons.delete_outline),
+              tooltip: 'Delete complaint',
+              onPressed: _isDeleting ? null : _deleteReport,
+            ),
           if (isAuthority)
             IconButton(
               icon: const Icon(Icons.edit_note),
@@ -260,7 +314,7 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
                           border: Border.all(color: statusColor.withOpacity(0.5)),
                         ),
                         child: Text(
-                          report.status,
+                          humanizeStatus(report.status),
                           style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 13),
                         ),
                       ),
@@ -312,14 +366,31 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
 
                   // Title & Description
                   Text(
-                    report.title,
+                    presentComplaintTitle(report.title, isSynthetic: report.isSynthetic),
                     style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    report.description,
+                    presentComplaintDescription(report.description, isSynthetic: report.isSynthetic),
                     style: const TextStyle(fontSize: 15, height: 1.4, color: AppColors.textSecondary),
                   ),
+                  if (report.isSynthetic || report.relatedReportCount > 1) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: report.isSynthetic ? Colors.orange.shade50 : Colors.indigo.shade50,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        report.isSynthetic
+                            ? 'Synthetic demonstration record — not an official or citizen submission.'
+                            : 'This report is linked to a related civic issue with ${report.relatedReportCount} reports. Reports remain individually tracked.',
+                        style: TextStyle(color: report.isSynthetic ? Colors.deepOrange.shade900 : Colors.indigo.shade900),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 20),
 
                   // AI Analysis Card
@@ -440,32 +511,24 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
                                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                                 ),
                               ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: report.locationValidationStatus == 'VALID'
-                                      ? Colors.green.shade50
-                                      : Colors.amber.shade50,
-                                  borderRadius: BorderRadius.circular(6),
-                                  border: Border.all(
-                                    color: report.locationValidationStatus == 'VALID'
-                                        ? Colors.green.shade200
-                                        : Colors.amber.shade200,
-                                  ),
-                                ),
-                                child: Text(
-                                  report.locationValidationStatus,
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    fontWeight: FontWeight.bold,
-                                    color: report.locationValidationStatus == 'VALID'
-                                        ? Colors.green.shade800
-                                        : Colors.amber.shade900,
-                                  ),
-                                ),
-                              ),
                             ],
                           ),
+                          if (locationMetadataNotice(
+                                report.locationValidationStatus,
+                                isSynthetic: report.isSynthetic,
+                              )
+                              case final notice?) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              notice,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: report.isSynthetic
+                                    ? Colors.deepOrange.shade800
+                                    : Colors.amber.shade900,
+                              ),
+                            ),
+                          ],
                           const Divider(height: 18),
                           if (report.captureTimestamp != null) ...[
                             Row(
@@ -528,7 +591,7 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
                                     builder: (context) => SingleLocationMapScreen(
                                       latitude: report.latitude,
                                       longitude: report.longitude,
-                                      title: report.title,
+                                      title: presentComplaintTitle(report.title, isSynthetic: report.isSynthetic),
                                       snippet: report.address ?? '${report.latitude.toStringAsFixed(4)}, ${report.longitude.toStringAsFixed(4)}',
                                       status: report.status,
                                     ),
@@ -656,7 +719,7 @@ class _ReportDetailScreenState extends ConsumerState<ReportDetailScreen> {
                                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                       children: [
                                         Text(
-                                          log.newStatus,
+                                          humanizeStatus(log.newStatus),
                                           style: TextStyle(fontWeight: FontWeight.bold, color: logColor, fontSize: 13),
                                         ),
                                         Text(

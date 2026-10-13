@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,8 +8,8 @@ import 'package:intl/intl.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/services/civic_issue_service.dart';
 import '../../../core/services/location_service.dart';
-import 'package:geolocator/geolocator.dart';
 import '../../../shared/models/civic_issue_model.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../maps/screens/single_location_map_screen.dart';
 
@@ -54,7 +54,8 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
 
   void _showResolveDialog() {
     final notesCtrl = TextEditingController();
-    File? evidenceImage;
+    XFile? evidenceImage;
+    Uint8List? evidenceImageBytes;
     CivicLocationData? resolutionLocation;
     DateTime? resolutionTimestamp;
     bool isResolving = false;
@@ -68,7 +69,11 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
             final picker = ImagePicker();
             final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 80);
             if (picked != null) {
-              setDialogState(() => evidenceImage = File(picked.path));
+              final bytes = await picked.readAsBytes();
+              setDialogState(() {
+                evidenceImage = picked;
+                evidenceImageBytes = bytes;
+              });
               // Immediately fetch GPS
               try {
                 final locData = await LocationService().getCurrentLocation(doReverseGeocode: false);
@@ -105,11 +110,14 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                       children: [
                         ClipRRect(
                           borderRadius: BorderRadius.circular(8),
-                          child: Image.file(evidenceImage!, height: 150, width: double.infinity, fit: BoxFit.cover),
+                          child: Image.memory(evidenceImageBytes!, height: 150, width: double.infinity, fit: BoxFit.cover),
                         ),
                         IconButton(
                           icon: const Icon(Icons.close, color: Colors.white),
-                          onPressed: () => setDialogState(() => evidenceImage = null),
+                          onPressed: () => setDialogState(() {
+                            evidenceImage = null;
+                            evidenceImageBytes = null;
+                          }),
                         ),
                       ],
                     )
@@ -148,14 +156,20 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                           await _civicIssueService.resolveCivicIssue(
                             _issue!.id,
                             notes,
-                            imagePath: evidenceImage?.path,
+                            imageBytes: evidenceImageBytes,
+                            imageName: evidenceImage?.name,
                             latitude: resolutionLocation?.latitude,
                             longitude: resolutionLocation?.longitude,
                             timestamp: resolutionTimestamp,
                           );
                           if (mounted) {
                             Navigator.pop(ctx);
-                            _fetchDetail();
+                            await _fetchDetail();
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Issue resolved and saved.')),
+                              );
+                            }
                           }
                         } catch (e) {
                           setDialogState(() => isResolving = false);
@@ -241,7 +255,7 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
               children: [
                 Expanded(
                   child: Text(
-                    issue.title,
+                    presentComplaintTitle(issue.title, isSynthetic: issue.isSynthetic),
                     style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
                   ),
                 ),
@@ -253,7 +267,7 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                     border: Border.all(color: statusColor.withOpacity(0.5)),
                   ),
                   child: Text(
-                    issue.status,
+                    humanizeStatus(issue.status),
                     style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 13),
                   ),
                 ),
@@ -261,9 +275,23 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
             ),
             const SizedBox(height: 12),
             Text(
-              issue.description,
+              presentComplaintDescription(issue.description, isSynthetic: issue.isSynthetic),
               style: const TextStyle(fontSize: 15, height: 1.4, color: AppColors.textSecondary),
             ),
+            if (issue.isSynthetic) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  'Demonstration record. Photos and resolution illustrations are synthetic and do not document actual municipal work.',
+                  style: TextStyle(color: Colors.deepOrange.shade900, fontSize: 12),
+                ),
+              ),
+            ],
             const SizedBox(height: 24),
 
             // Before / After Comparison
@@ -280,7 +308,10 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                   Expanded(
                     child: Column(
                       children: [
-                        const Text('Before (Reported)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange)),
+                        Text(
+                          issue.isSynthetic ? 'Reported issue (demo illustration)' : 'Before (Reported)',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.orange),
+                        ),
                         const SizedBox(height: 8),
                         if (beforePhotoUrl != null)
                           ClipRRect(
@@ -307,7 +338,10 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                   Expanded(
                     child: Column(
                       children: [
-                        const Text('After (Resolved)', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green)),
+                        Text(
+                          issue.isSynthetic ? 'Conceptual outcome (not work evidence)' : 'After (Resolved)',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
+                        ),
                         const SizedBox(height: 8),
                         if (issue.fullResolutionEvidenceUrl != null)
                           ClipRRect(
@@ -453,7 +487,7 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                               builder: (context) => SingleLocationMapScreen(
                                 latitude: issue.latitude,
                                 longitude: issue.longitude,
-                                title: issue.title,
+                                title: presentComplaintTitle(issue.title, isSynthetic: issue.isSynthetic),
                                 snippet: issue.address ?? '${issue.latitude.toStringAsFixed(4)}, ${issue.longitude.toStringAsFixed(4)}',
                                 status: issue.status,
                               ),
@@ -513,11 +547,11 @@ class _CivicIssueDetailScreenState extends ConsumerState<CivicIssueDetailScreen>
                                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(
-                                    log.newStatus,
+                                    humanizeStatus(log.newStatus),
                                     style: TextStyle(fontWeight: FontWeight.bold, color: logColor, fontSize: 13),
                                   ),
                                   Text(
-                                    '${DateFormat('MMM d, hh:mm a').format(log.createdAt)}',
+                                    DateFormat('MMM d, hh:mm a').format(log.createdAt),
                                     style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
                                   ),
                                 ],

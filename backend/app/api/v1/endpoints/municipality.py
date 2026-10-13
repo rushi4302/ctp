@@ -12,11 +12,6 @@ from app.services.report_service import ReportService
 router = APIRouter(prefix="/municipality")
 
 
-@router.get("", summary="Check municipality module status")
-def municipality_status() -> dict[str, str]:
-    return {"module": "municipality", "status": "ready"}
-
-
 @router.get("/stats", summary="Get municipal dashboard statistics")
 def get_municipality_stats(
     db: Session = Depends(get_db),
@@ -134,4 +129,3 @@ def get_municipality_ward_stats(
 ):
     from app.services.civic_issue_service import CivicIssueService
     return CivicIssueService.get_transparency_statistics(db=db, ward=ward)
-

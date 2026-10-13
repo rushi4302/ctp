@@ -65,14 +65,18 @@ class CivicIssueService {
       };
 
       if (imageBytes != null) {
+        final filename = _safeImageName(imageName);
         formMap['evidence_image'] = MultipartFile.fromBytes(
           imageBytes,
-          filename: imageName ?? 'evidence.jpg',
+          filename: filename,
+          contentType: _imageMediaType(filename),
         );
       } else if (imagePath != null && imagePath.isNotEmpty) {
+        final filename = _safeImageName(imagePath.split('/').last);
         formMap['evidence_image'] = await MultipartFile.fromFile(
           imagePath,
-          filename: imagePath.split('/').last,
+          filename: filename,
+          contentType: _imageMediaType(filename),
         );
       }
 
@@ -89,6 +93,26 @@ class CivicIssueService {
     }
   }
 
+  String _safeImageName(String? name) {
+    final candidate = (name ?? '').split(RegExp(r'[/\\]')).last;
+    final extension = candidate.contains('.') ? candidate.split('.').last.toLowerCase() : '';
+    return const {'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'}.contains(extension)
+        ? candidate
+        : 'evidence.jpg';
+  }
+
+  DioMediaType _imageMediaType(String filename) {
+    final extension = filename.split('.').last.toLowerCase();
+    final subtype = switch (extension) {
+      'png' => 'png',
+      'webp' => 'webp',
+      'heic' => 'heic',
+      'heif' => 'heif',
+      _ => 'jpeg',
+    };
+    return DioMediaType('image', subtype);
+  }
+
   Future<CivicIssueModel> updateStatus(
     int issueId, {
     required String status,
@@ -100,6 +124,25 @@ class CivicIssueService {
         data: {
           'status': status,
           if (comment != null) 'comment': comment,
+        },
+      );
+      return CivicIssueModel.fromJson(response.data as Map<String, dynamic>);
+    } catch (e) {
+      throw ApiClient.getErrorMessage(e);
+    }
+  }
+
+  Future<CivicIssueModel> assignDepartment(
+    int issueId, {
+    required String department,
+    String? notes,
+  }) async {
+    try {
+      final response = await _client.dio.patch(
+        '${ApiConstants.baseUrl}/civic-issues/$issueId/assign',
+        data: {
+          'department_id': department.trim(),
+          if (notes != null && notes.trim().isNotEmpty) 'notes': notes.trim(),
         },
       );
       return CivicIssueModel.fromJson(response.data as Map<String, dynamic>);

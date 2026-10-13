@@ -1,5 +1,9 @@
 import io
 from fastapi import status
+from app.core.roles import UserRole
+from app.core.security import create_access_token, hash_password
+from app.models.report import CivicIssue, Comment, Report, ReportStatusLog, Upvote
+from app.models.user import User
 
 
 def test_create_report_json(client, citizen_headers, citizen_user):
@@ -21,6 +25,22 @@ def test_create_report_json(client, citizen_headers, citizen_user):
     assert data["status"] == "SUBMITTED"
     assert data["location_validation_status"] == "MISSING_METADATA"
     assert "id" in data
+
+
+def test_report_response_labels_synthetic_demo_records(client, citizen_headers):
+    response = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "[SYNTHETIC DEMO TEST] Example",
+            "description": "Synthetic record to verify explicit demo labeling.",
+            "category": "Garbage",
+            "latitude": 18.5793,
+            "longitude": 73.9828,
+        },
+    )
+    assert response.status_code == status.HTTP_201_CREATED
+    assert response.json()["is_synthetic"] is True
 
 
 def test_create_report_multipart_with_image(client, citizen_headers, citizen_user, sample_image_bytes):
@@ -156,6 +176,7 @@ def test_get_report_detail_and_status_logs(client, citizen_headers):
     assert detail_res.status_code == status.HTTP_200_OK
     data = detail_res.json()
     assert data["id"] == report_id
+    assert "email" not in data["reporter"]
     assert len(data["status_logs"]) >= 1
     assert data["status_logs"][0]["new_status"] == "SUBMITTED"
 
@@ -239,6 +260,31 @@ def test_admin_update_status_and_logs(client, citizen_headers, municipality_head
     assert "RESOLVED" in statuses
 
 
+def test_report_status_rejects_invalid_transition(client, citizen_headers, admin_headers):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Report transition validation",
+            "description": "Check report workflow rules.",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    report_id = created.json()["id"]
+    assert client.patch(
+        f"/api/v1/reports/{report_id}/status",
+        json={"status": "RESOLVED"},
+        headers=admin_headers,
+    ).status_code == status.HTTP_200_OK
+    invalid = client.patch(
+        f"/api/v1/reports/{report_id}/status",
+        json={"status": "VERIFIED"},
+        headers=admin_headers,
+    )
+    assert invalid.status_code == status.HTTP_409_CONFLICT
+
+
 def test_comments_flow(client, citizen_headers, municipality_headers):
     create_res = client.post(
         "/api/v1/reports",
@@ -273,6 +319,110 @@ def test_comments_flow(client, citizen_headers, municipality_headers):
     list_res = client.get(f"/api/v1/reports/{report_id}/comments")
     assert list_res.status_code == status.HTTP_200_OK
     assert len(list_res.json()) == 2
+
+
+def test_owner_can_delete_report_and_cascaded_data(client, db, citizen_headers, citizen_user):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Delete flow test",
+            "description": "A report created to verify owner deletion.",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    assert created.status_code == status.HTTP_201_CREATED
+    report_id = created.json()["id"]
+    civic_issue_id = created.json()["civic_issue_id"]
+
+    comment_response = client.post(
+        f"/api/v1/reports/{report_id}/comments",
+        json={"content": "Test comment to cascade."},
+        headers=citizen_headers,
+    )
+    assert comment_response.status_code == status.HTTP_201_CREATED
+    assert client.post(f"/api/v1/reports/{report_id}/upvote", headers=citizen_headers).status_code == 200
+
+    deleted = client.delete(f"/api/v1/reports/{report_id}", headers=citizen_headers)
+    assert deleted.status_code == status.HTTP_200_OK
+    assert client.get(f"/api/v1/reports/{report_id}", headers=citizen_headers).status_code == status.HTTP_404_NOT_FOUND
+    assert db.query(Report).filter(Report.id == report_id).count() == 0
+    assert db.query(Comment).filter(Comment.report_id == report_id).count() == 0
+    assert db.query(Upvote).filter(Upvote.report_id == report_id).count() == 0
+    assert db.query(ReportStatusLog).filter(ReportStatusLog.report_id == report_id).count() == 0
+    assert db.query(CivicIssue).filter(CivicIssue.id == civic_issue_id).count() == 0
+
+
+def test_delete_report_is_owner_or_admin_only(client, db, citizen_headers, citizen_user, admin_headers):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Authorization delete test",
+            "description": "Only the owner or admin should delete this report.",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    report_id = created.json()["id"]
+
+    other_user = User(
+        email="other-delete-user@test.civic.org",
+        full_name="Other Citizen",
+        hashed_password=hash_password("Password123!"),
+        role=UserRole.CITIZEN,
+        is_active=True,
+    )
+    db.add(other_user)
+    db.commit()
+    other_token = create_access_token({"sub": str(other_user.id), "role": other_user.role.value})
+    other_headers = {"Authorization": f"Bearer {other_token}"}
+
+    assert client.delete(f"/api/v1/reports/{report_id}", headers=other_headers).status_code == status.HTTP_403_FORBIDDEN
+    assert client.delete(f"/api/v1/reports/{report_id}", headers=admin_headers).status_code == status.HTTP_200_OK
+    assert client.delete(f"/api/v1/reports/{report_id}", headers=citizen_headers).status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_owner_cannot_delete_report_after_verification(client, db, citizen_headers, municipality_headers):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Lifecycle delete test",
+            "description": "A verified report remains in the civic record.",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    assert created.status_code == status.HTTP_201_CREATED
+    report_id = created.json()["id"]
+
+    verified = client.patch(
+        f"/api/v1/reports/{report_id}/status",
+        json={"status": "VERIFIED", "comment": "Lifecycle test verification."},
+        headers=municipality_headers,
+    )
+    assert verified.status_code == status.HTTP_200_OK
+
+    deleted = client.delete(f"/api/v1/reports/{report_id}", headers=citizen_headers)
+    assert deleted.status_code == status.HTTP_409_CONFLICT
+    assert db.query(Report).filter(Report.id == report_id).count() == 1
+
+
+def test_delete_report_requires_authentication(client, citizen_headers):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Authenticated delete test",
+            "description": "Deletion requires a session.",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    response = client.delete(f"/api/v1/reports/{created.json()['id']}")
+    assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 def test_upvotes_toggle_and_uniqueness(client, citizen_headers, admin_headers):

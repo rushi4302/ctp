@@ -8,7 +8,7 @@ public statistics, and private personal data is never exposed.
 """
 
 from typing import List, Optional
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.constants import CivicIssueStatus
@@ -27,6 +27,7 @@ router = APIRouter(prefix="/transparency", tags=["transparency"])
 @router.get("/stats", response_model=TransparencyStatsResponse, summary="Public civic transparency statistics")
 def get_transparency_statistics(
     ward: Optional[str] = None,
+    locality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -37,12 +38,15 @@ def get_transparency_statistics(
     - Category distribution
     - Ward-level breakdown
     """
-    return CivicIssueService.get_transparency_statistics(db=db, ward=ward)
+    if ward and locality:
+        raise HTTPException(status_code=422, detail="Filter by either ward or locality, not both.")
+    return CivicIssueService.get_transparency_statistics(db=db, ward=ward, locality=locality)
 
 
 @router.get("/health-score", response_model=CivicHealthScoreResponse, summary="Explainable Civic Health Score")
 def get_civic_health_score(
     ward: Optional[str] = None,
+    locality: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -52,15 +56,19 @@ def get_civic_health_score(
       - Severity Health (25%)
       - Pending Age Health (15%)
       - Recurrence Health (10%)
-    Provides transparent mathematical justification and breakdown.
+    Provides transparent mathematical justification and breakdown. Scores are
+    withheld when fewer than five active issues exist in the selected scope.
     """
-    return CivicIssueService.calculate_civic_health_score(db=db, ward=ward)
+    if ward and locality:
+        raise HTTPException(status_code=422, detail="Filter by either ward or locality, not both.")
+    return CivicIssueService.calculate_civic_health_score(db=db, ward=ward, locality=locality)
 
 
 @router.get("/map", response_model=List[PublicIssueMapPoint], summary="Public issue map data")
 def get_public_issue_map(
     ward: Optional[str] = None,
     category: Optional[str] = None,
+    status_filter: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
@@ -68,11 +76,13 @@ def get_public_issue_map(
     Excludes sensitive citizen identity information.
     """
     query = db.query(CivicIssue).filter(
+        CivicIssue.report_count > 0,
         CivicIssue.status.in_([
             CivicIssueStatus.PENDING.value,
             CivicIssueStatus.ASSIGNED.value,
             CivicIssueStatus.IN_PROGRESS.value,
             CivicIssueStatus.RESOLVED.value,
+            CivicIssueStatus.CLOSED.value,
         ])
     )
 
@@ -80,6 +90,12 @@ def get_public_issue_map(
         query = query.filter(CivicIssue.ward == ward.strip())
     if category and category.strip():
         query = query.filter(CivicIssue.category == category.strip())
+    if status_filter and status_filter.strip():
+        normalized_status = status_filter.strip().upper()
+        allowed_statuses = {value.value for value in CivicIssueStatus}
+        if normalized_status not in allowed_statuses:
+            raise HTTPException(status_code=422, detail="Unsupported civic issue status.")
+        query = query.filter(CivicIssue.status == normalized_status)
 
     issues = query.all()
 
@@ -94,6 +110,7 @@ def get_public_issue_map(
             locality=issue.locality,
             ward=issue.ward,
             report_count=issue.report_count,
+            is_synthetic=issue.title.startswith("[SYNTHETIC DEMO"),
         )
         for issue in issues
     ]

@@ -41,6 +41,7 @@ class CivicIssueStatusLogModel {
 
 class CivicIssueModel {
   final int id;
+  final bool isSynthetic;
   final String title;
   final String description;
   final String category;
@@ -78,6 +79,7 @@ class CivicIssueModel {
 
   CivicIssueModel({
     required this.id,
+    this.isSynthetic = false,
     required this.title,
     required this.description,
     required this.category,
@@ -121,6 +123,7 @@ class CivicIssueModel {
   factory CivicIssueModel.fromJson(Map<String, dynamic> json) {
     return CivicIssueModel(
       id: json['id'] as int,
+      isSynthetic: json['is_synthetic'] as bool? ?? false,
       title: json['title'] as String? ?? '',
       description: json['description'] as String? ?? '',
       category: json['category'] as String? ?? 'Other',

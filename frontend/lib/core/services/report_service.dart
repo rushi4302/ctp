@@ -7,6 +7,33 @@ import '../../shared/models/report_model.dart';
 class ReportService {
   final ApiClient _client = ApiClient();
 
+  Future<List<ReportModel>> searchReports({
+    required String query,
+    String? category,
+    String? status,
+    int skip = 0,
+    int limit = 25,
+  }) async {
+    try {
+      final response = await _client.dio.get(
+        ApiConstants.search,
+        queryParameters: {
+          'q': query.trim(),
+          'skip': skip,
+          'limit': limit,
+          if (category != null && category.isNotEmpty) 'category': category,
+          if (status != null && status.isNotEmpty) 'status_filter': status,
+        },
+      );
+      final list = response.data as List<dynamic>;
+      return list
+          .map((item) => ReportModel.fromJson(item as Map<String, dynamic>))
+          .toList();
+    } catch (e) {
+      throw ApiClient.getErrorMessage(e);
+    }
+  }
+
   Future<List<ReportModel>> getReports({
     int skip = 0,
     int limit = 50,
@@ -35,7 +62,9 @@ class ReportService {
       );
 
       final list = response.data as List<dynamic>;
-      return list.map((item) => ReportModel.fromJson(item as Map<String, dynamic>)).toList();
+      return list
+          .map((item) => ReportModel.fromJson(item as Map<String, dynamic>))
+          .toList();
     } catch (e) {
       throw ApiClient.getErrorMessage(e);
     }
@@ -45,6 +74,14 @@ class ReportService {
     try {
       final response = await _client.dio.get('${ApiConstants.reports}/$id');
       return ReportModel.fromJson(response.data as Map<String, dynamic>);
+    } catch (e) {
+      throw ApiClient.getErrorMessage(e);
+    }
+  }
+
+  Future<void> deleteReport(int id) async {
+    try {
+      await _client.dio.delete('${ApiConstants.reports}/$id');
     } catch (e) {
       throw ApiClient.getErrorMessage(e);
     }
@@ -74,8 +111,8 @@ class ReportService {
       final finalTitle = (title != null && title.trim().isNotEmpty)
           ? title.trim()
           : (description.trim().length > 60
-              ? '${description.trim().substring(0, 57)}...'
-              : description.trim());
+                ? '${description.trim().substring(0, 57)}...'
+                : description.trim());
 
       final Map<String, dynamic> formMap = {
         'title': finalTitle,
@@ -154,7 +191,8 @@ class ReportService {
         data: {
           'status': status,
           if (comment != null) 'comment': comment,
-          if (assignedDepartmentId != null) 'assigned_department_id': assignedDepartmentId,
+          if (assignedDepartmentId != null)
+            'assigned_department_id': assignedDepartmentId,
           if (contractorId != null) 'contractor_id': contractorId,
         },
       );

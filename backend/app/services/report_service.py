@@ -5,7 +5,13 @@ from fastapi import HTTPException, UploadFile, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
-from app.core.constants import LocationValidationStatus, ModerationStatus, ReportSeverity, ReportStatus
+from app.core.constants import (
+    CivicIssueStatus,
+    LocationValidationStatus,
+    ModerationStatus,
+    ReportSeverity,
+    ReportStatus,
+)
 from app.core.roles import UserRole
 from app.models.report import Comment, Report, ReportMedia, ReportStatusLog, Upvote
 from app.models.user import User
@@ -160,7 +166,10 @@ class ReportService:
         lon: Optional[float] = None,
         radius_km: Optional[float] = None,
     ) -> List[dict]:
-        query = db.query(Report).options(joinedload(Report.media))
+        query = db.query(Report).options(
+            joinedload(Report.media),
+            joinedload(Report.civic_issue),
+        )
 
         if not include_rejected:
             query = query.filter(Report.moderation_status == ModerationStatus.ACTIVE.value)
@@ -227,6 +236,8 @@ class ReportService:
                 "ai_confidence": r.ai_confidence,
                 "location_validation_status": r.location_validation_status,
                 "civic_issue_id": r.civic_issue_id,
+                "related_report_count": r.civic_issue.report_count if r.civic_issue else 1,
+                "is_synthetic": r.title.startswith("[SYNTHETIC DEMO"),
                 "moderation_status": r.moderation_status,
                 "rejected_at": r.rejected_at,
                 "rejection_reason": r.rejection_reason,
@@ -251,6 +262,7 @@ class ReportService:
             db.query(Report)
             .options(
                 joinedload(Report.media),
+                joinedload(Report.civic_issue),
                 joinedload(Report.reporter),
                 joinedload(Report.contractor),
                 joinedload(Report.comments).joinedload(Comment.user),
@@ -298,6 +310,8 @@ class ReportService:
             "ai_confidence": report.ai_confidence,
             "location_validation_status": report.location_validation_status,
             "civic_issue_id": report.civic_issue_id,
+            "related_report_count": report.civic_issue.report_count if report.civic_issue else 1,
+            "is_synthetic": report.title.startswith("[SYNTHETIC DEMO"),
             "moderation_status": report.moderation_status,
             "rejected_at": report.rejected_at,
             "rejection_reason": report.rejection_reason,
@@ -358,15 +372,45 @@ class ReportService:
         if not report:
             raise HTTPException(status_code=404, detail="Report not found.")
 
-        if user.role == UserRole.CITIZEN and report.reporter_id != user.id:
+        is_admin = user.role == UserRole.ADMIN
+        is_owner = user.role == UserRole.CITIZEN and report.reporter_id == user.id
+        if not (is_admin or is_owner):
             raise HTTPException(status_code=403, detail="Not authorized to delete this report.")
+        if is_owner and report.status != ReportStatus.SUBMITTED.value:
+            raise HTTPException(
+                status_code=409,
+                detail="A complaint can only be deleted before it is verified or processed.",
+            )
 
-        # Clean up disk files
-        for media in report.media:
-            StorageService.delete_file(media.file_name)
-
+        # Keep uploaded files until the database transaction commits. Report
+        # relationships cascade to comments, votes, media rows, and status logs.
+        filenames = [media.file_name for media in report.media]
+        civic_issue = report.civic_issue
         db.delete(report)
+        db.flush()
+
+        # Civic issues are shared by related reports. Keep the aggregate while
+        # any report remains, and remove it (including its timeline) when this
+        # was the last linked report.
+        if civic_issue is not None:
+            remaining_count = (
+                db.query(Report)
+                .filter(Report.civic_issue_id == civic_issue.id)
+                .count()
+            )
+            if remaining_count:
+                civic_issue.report_count = remaining_count
+            else:
+                db.delete(civic_issue)
+
         db.commit()
+
+        # File deletion is an external side effect; do it only after the
+        # database commit so a failed commit never leaves a live row without
+        # its image. A cleanup failure does not undo the persisted deletion.
+        for filename in filenames:
+            if not StorageService.delete_file(filename):
+                logger.warning("Could not remove uploaded report image %s", filename)
         return True
 
     @classmethod
@@ -391,6 +435,40 @@ class ReportService:
         old_status = report.status
         new_status = status_in.status.value
 
+        allowed_report_transitions = {
+            ReportStatus.SUBMITTED.value: {
+                ReportStatus.VERIFIED.value,
+                ReportStatus.IN_PROGRESS.value,
+                ReportStatus.RESOLVED.value,
+                ReportStatus.REJECTED.value,
+                ReportStatus.FLAGGED.value,
+            },
+            ReportStatus.VERIFIED.value: {
+                ReportStatus.IN_PROGRESS.value,
+                ReportStatus.RESOLVED.value,
+                ReportStatus.REJECTED.value,
+                ReportStatus.FLAGGED.value,
+            },
+            ReportStatus.IN_PROGRESS.value: {
+                ReportStatus.RESOLVED.value,
+                ReportStatus.REJECTED.value,
+                ReportStatus.FLAGGED.value,
+            },
+            ReportStatus.RESOLVED.value: {ReportStatus.IN_PROGRESS.value},
+            ReportStatus.REJECTED.value: {ReportStatus.SUBMITTED.value},
+            ReportStatus.FLAGGED.value: {
+                ReportStatus.VERIFIED.value,
+                ReportStatus.REJECTED.value,
+            },
+        }
+        if new_status == old_status:
+            return cls.get_report_by_id(db, report.id, current_user_id=authority.id)
+        if new_status not in allowed_report_transitions.get(old_status, set()):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot transition report from {old_status} to {new_status}.",
+            )
+
         report.status = new_status
         if status_in.assigned_department_id is not None:
             report.assigned_department_id = status_in.assigned_department_id
@@ -409,6 +487,48 @@ class ReportService:
             created_at=now,
         )
         db.add(log)
+
+        # Keep the shared issue lifecycle in step with report workflow. A
+        # linked issue can only move forward here; reopen is handled by the
+        # dedicated civic issue endpoint so its status history stays explicit.
+        issue = report.civic_issue
+        if issue is not None:
+            target_issue_status = {
+                ReportStatus.VERIFIED.value: CivicIssueStatus.ASSIGNED.value,
+                ReportStatus.IN_PROGRESS.value: CivicIssueStatus.IN_PROGRESS.value,
+                ReportStatus.RESOLVED.value: CivicIssueStatus.RESOLVED.value,
+            }.get(new_status)
+            if new_status == ReportStatus.REJECTED.value:
+                remaining_active_reports = (
+                    db.query(Report)
+                    .filter(
+                        Report.civic_issue_id == issue.id,
+                        Report.moderation_status == ModerationStatus.ACTIVE.value,
+                        Report.status.notin_(
+                            [ReportStatus.REJECTED.value, ReportStatus.FLAGGED.value]
+                        ),
+                    )
+                    .count()
+                )
+                if remaining_active_reports == 0:
+                    target_issue_status = CivicIssueStatus.CLOSED.value
+
+            if target_issue_status is not None:
+                issue_order = {
+                    CivicIssueStatus.PENDING.value: 0,
+                    CivicIssueStatus.ASSIGNED.value: 1,
+                    CivicIssueStatus.IN_PROGRESS.value: 2,
+                    CivicIssueStatus.RESOLVED.value: 3,
+                    CivicIssueStatus.CLOSED.value: 4,
+                }
+                if issue_order.get(target_issue_status, 0) > issue_order.get(issue.status, 0):
+                    CivicIssueService.update_status(
+                        db=db,
+                        issue_id=issue.id,
+                        new_status=target_issue_status,
+                        user=authority,
+                        comment=status_in.comment,
+                    )
         db.commit()
         return cls.get_report_by_id(db, report.id, current_user_id=authority.id)
 

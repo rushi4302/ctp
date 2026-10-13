@@ -1,16 +1,18 @@
-import '../../shared/models/report_model.dart';
 import '../constants/api_constants.dart';
 import '../network/api_client.dart';
 
 class TransparencyService {
   final ApiClient _client = ApiClient();
 
-  Future<Map<String, dynamic>> getTransparencyStats({String? ward}) async {
+  Future<Map<String, dynamic>> getTransparencyStats({String? ward, String? locality}) async {
     try {
-      final queryParams = ward != null ? {'ward': ward} : null;
+      final queryParams = <String, dynamic>{
+        if (ward != null) 'ward': ward,
+        if (locality != null) 'locality': locality,
+      };
       final response = await _client.dio.get(
         '${ApiConstants.baseUrl}/transparency/stats',
-        queryParameters: queryParams,
+        queryParameters: queryParams.isEmpty ? null : queryParams,
       );
       return response.data as Map<String, dynamic>;
     } catch (e) {
@@ -18,12 +20,15 @@ class TransparencyService {
     }
   }
 
-  Future<Map<String, dynamic>> getCivicHealthScore({String? ward}) async {
+  Future<Map<String, dynamic>> getCivicHealthScore({String? ward, String? locality}) async {
     try {
-      final queryParams = ward != null ? {'ward': ward} : null;
+      final queryParams = <String, dynamic>{
+        if (ward != null) 'ward': ward,
+        if (locality != null) 'locality': locality,
+      };
       final response = await _client.dio.get(
         '${ApiConstants.baseUrl}/transparency/health-score',
-        queryParameters: queryParams,
+        queryParameters: queryParams.isEmpty ? null : queryParams,
       );
       return response.data as Map<String, dynamic>;
     } catch (e) {
@@ -31,11 +36,12 @@ class TransparencyService {
     }
   }
 
-  Future<List<Map<String, dynamic>>> getPublicMapPoints({String? ward, String? category}) async {
+  Future<List<Map<String, dynamic>>> getPublicMapPoints({String? ward, String? category, String? status}) async {
     try {
       final queryParams = <String, dynamic>{
         if (ward != null) 'ward': ward,
         if (category != null) 'category': category,
+        if (status != null) 'status_filter': status,
       };
       final response = await _client.dio.get(
         '${ApiConstants.baseUrl}/transparency/map',

@@ -1,35 +1,16 @@
 services:
-  postgres:
+  postgres_test:
     image: postgres:17
-    container_name: civic_postgres
+    container_name: civic_postgres_test
     restart: unless-stopped
     environment:
-      POSTGRES_DB: civic_db
-      POSTGRES_USER: civic_admin
-      POSTGRES_PASSWORD: civic_password
+      POSTGRES_DB: civic_db_test
+      POSTGRES_USER: civic_user
+      POSTGRES_PASSWORD: ${CIVIC_DB_TEST_PASSWORD:?Set CIVIC_DB_TEST_PASSWORD in your shell}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: civic_backend
-    restart: unless-stopped
-    depends_on:
-      - postgres
-    environment:
-      APP_NAME: "Civic Intelligence Platform"
-      APP_VERSION: "1.0.0"
-      DEBUG: "true"
-      DATABASE_URL: "postgresql://civic_admin:civic_password@postgres:5432/civic_db"
-      UPLOAD_DIR: "uploads"
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./backend/uploads:/app/uploads
+      - civic_test_postgres_data:/var/lib/postgresql/data
 
 volumes:
-  postgres_data:
+  civic_test_postgres_data:

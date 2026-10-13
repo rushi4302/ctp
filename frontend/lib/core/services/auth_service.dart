@@ -66,6 +66,25 @@ class AuthService {
     }
   }
 
+  Future<UserModel> updateProfile({required String fullName, required String email}) async {
+    try {
+      final response = await _client.dio.patch(
+        ApiConstants.userProfile,
+        data: {'full_name': fullName.trim(), 'email': email.trim()},
+      );
+      final user = UserModel.fromJson(response.data as Map<String, dynamic>);
+      await TokenStorage.saveUserData(
+        id: user.id,
+        email: user.email,
+        fullName: user.fullName,
+        role: user.role,
+      );
+      return user;
+    } catch (e) {
+      throw ApiClient.getErrorMessage(e);
+    }
+  }
+
   Future<String> forgotPassword(String email) async {
     try {
       final response = await _client.dio.post(

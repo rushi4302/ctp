@@ -94,6 +94,11 @@ class CivicIssue(Base):
         order_by="CivicIssueStatusLog.created_at.asc()",
     )
 
+    @property
+    def is_synthetic(self) -> bool:
+        """Keep the existing title marker as internal synthetic-record metadata."""
+        return self.title.startswith("[SYNTHETIC DEMO")
+
 
 class CivicIssueStatusLog(Base):
     __tablename__ = "civic_issue_status_logs"

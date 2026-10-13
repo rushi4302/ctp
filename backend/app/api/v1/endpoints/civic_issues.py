@@ -6,6 +6,8 @@ Enforces backend Role-Based Access Control (RBAC) across Citizens,
 Municipal Authorities, Administrators, and Field Workers.
 """
 
+from datetime import datetime
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Form, UploadFile, File
 from sqlalchemy.orm import Session
@@ -27,6 +29,7 @@ from app.schemas.civic_issue import (
 from app.services.civic_issue_service import CivicIssueService
 
 router = APIRouter(prefix="/civic-issues", tags=["civic-issues"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=List[CivicIssueResponse], summary="List unique civic issues")
@@ -153,27 +156,45 @@ async def resolve_civic_issue(
     resolution_longitude: Optional[float] = Form(None),
     resolution_timestamp: Optional[datetime] = Form(None),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles([
+        UserRole.ADMIN,
+        UserRole.MUNICIPALITY,
+        UserRole.FIELD_WORKER,
+        UserRole.CONTRACTOR,
+    ])),
 ):
     """
     Marks a civic issue as RESOLVED with resolution notes and optional proof media URL.
     Authorized for assigned Field Worker, Municipal Authority, or Admin.
     """
-    resolution_evidence_url = None
-    if evidence_image:
-        uploaded_media_data = await StorageService.save_upload(evidence_image)
-        resolution_evidence_url = uploaded_media_data["file_url"]
+    uploaded_media_data = None
+    try:
+        if evidence_image:
+            uploaded_media_data = await StorageService.save_upload(evidence_image)
 
-    return CivicIssueService.resolve_with_evidence(
-        db=db,
-        issue_id=issue_id,
-        user=current_user,
-        resolution_notes=resolution_notes,
-        resolution_evidence_url=resolution_evidence_url,
-        resolution_latitude=resolution_latitude,
-        resolution_longitude=resolution_longitude,
-        resolution_timestamp=resolution_timestamp,
-    )
+        return CivicIssueService.resolve_with_evidence(
+            db=db,
+            issue_id=issue_id,
+            user=current_user,
+            resolution_notes=resolution_notes,
+            resolution_evidence_url=(uploaded_media_data["file_url"] if uploaded_media_data else None),
+            resolution_latitude=resolution_latitude,
+            resolution_longitude=resolution_longitude,
+            resolution_timestamp=resolution_timestamp,
+        )
+    except HTTPException:
+        if uploaded_media_data:
+            StorageService.delete_file(uploaded_media_data["file_name"])
+        raise
+    except Exception as exc:
+        if uploaded_media_data:
+            StorageService.delete_file(uploaded_media_data["file_name"])
+        db.rollback()
+        logger.exception("Resolution update failed for civic issue %s", issue_id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Resolution update could not be saved. Please retry.",
+        ) from exc
 
 
 @router.post("/{issue_id}/reopen", response_model=CivicIssueResponse, summary="Request reopen (Still not resolved)")

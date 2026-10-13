@@ -5,7 +5,8 @@ import '../../../core/constants/app_colors.dart';
 import '../providers/auth_provider.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.adminEntry = false});
+  final bool adminEntry;
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -16,6 +17,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
+  String? _accessError;
 
   @override
   void dispose() {
@@ -34,6 +36,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     if (success && mounted) {
       final user = ref.read(authProvider).user;
+      if (widget.adminEntry && (user == null || !user.isMunicipality)) {
+        await ref.read(authProvider.notifier).logout();
+        if (mounted) setState(() => _accessError = 'This account does not have administrator or municipal access.');
+        return;
+      }
       if (user != null && user.isMunicipality) {
         context.go('/municipality');
       } else {
@@ -64,8 +71,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     color: AppColors.primary,
                   ),
                   const SizedBox(height: 16),
-                  const Text(
-                    'Civic Intelligence',
+                  Text(
+                    widget.adminEntry ? 'Administrator Sign In' : 'Civic Intelligence',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 28,
@@ -74,8 +81,8 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
-                    'Citizen Reporting & Municipal Governance',
+                  Text(
+                    widget.adminEntry ? 'Authorized municipal staff only' : 'Citizen Reporting & Municipal Governance',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 14,
@@ -84,7 +91,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                   const SizedBox(height: 36),
 
-                  if (authState.errorMessage != null) ...[
+                  if (authState.errorMessage != null || _accessError != null) ...[
                     Container(
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
@@ -98,7 +105,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                           const SizedBox(width: 8),
                           Expanded(
                             child: Text(
-                              authState.errorMessage!,
+                              _accessError ?? authState.errorMessage!,
                               style: TextStyle(color: Colors.red.shade900, fontSize: 13),
                             ),
                           ),
@@ -204,6 +211,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 14),
+                  TextButton.icon(
+                    onPressed: () => context.go(widget.adminEntry ? '/login' : '/admin-login'),
+                    icon: const Icon(Icons.admin_panel_settings_outlined),
+                    label: Text(widget.adminEntry ? 'Citizen sign in' : 'Administrator / municipal staff sign in'),
                   ),
                 ],
               ),

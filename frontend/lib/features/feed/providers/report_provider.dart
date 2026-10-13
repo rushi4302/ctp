@@ -26,13 +26,15 @@ class ReportListState {
     String? selectedCategory,
     String? selectedStatus,
     String? errorMessage,
+    bool clearSelectedCategory = false,
+    bool clearSelectedStatus = false,
   }) {
     return ReportListState(
       isLoading: isLoading ?? this.isLoading,
       reports: reports ?? this.reports,
       myReports: myReports ?? this.myReports,
-      selectedCategory: selectedCategory ?? this.selectedCategory,
-      selectedStatus: selectedStatus ?? this.selectedStatus,
+      selectedCategory: clearSelectedCategory ? null : selectedCategory ?? this.selectedCategory,
+      selectedStatus: clearSelectedStatus ? null : selectedStatus ?? this.selectedStatus,
       errorMessage: errorMessage,
     );
   }
@@ -40,6 +42,7 @@ class ReportListState {
 
 class ReportListNotifier extends StateNotifier<ReportListState> {
   final ReportService _reportService = ReportService();
+  String? _activeSearchQuery;
 
   ReportListNotifier() : super(ReportListState()) {
     fetchReports();
@@ -48,14 +51,26 @@ class ReportListNotifier extends StateNotifier<ReportListState> {
   Future<void> fetchReports() async {
     state = state.copyWith(isLoading: true, errorMessage: null);
     try {
-      final reports = await _reportService.getReports(
-        category: state.selectedCategory,
-        status: state.selectedStatus,
-      );
+      final reports = _activeSearchQuery == null
+          ? await _reportService.getReports(
+              category: state.selectedCategory,
+              status: state.selectedStatus,
+            )
+          : await _reportService.searchReports(
+              query: _activeSearchQuery!,
+              category: state.selectedCategory,
+              status: state.selectedStatus,
+            );
       state = state.copyWith(isLoading: false, reports: reports);
     } catch (e) {
       state = state.copyWith(isLoading: false, errorMessage: e.toString());
     }
+  }
+
+  Future<void> searchReports(String query) async {
+    final normalized = query.trim();
+    _activeSearchQuery = normalized.length >= 2 ? normalized : null;
+    await fetchReports();
   }
 
   Future<void> fetchMyReports() async {
@@ -70,7 +85,7 @@ class ReportListNotifier extends StateNotifier<ReportListState> {
 
   void filterCategory(String? category) {
     if (state.selectedCategory == category) {
-      state = state.copyWith(selectedCategory: null);
+      state = state.copyWith(clearSelectedCategory: true);
     } else {
       state = state.copyWith(selectedCategory: category);
     }
@@ -79,7 +94,7 @@ class ReportListNotifier extends StateNotifier<ReportListState> {
 
   void filterStatus(String? status) {
     if (state.selectedStatus == status) {
-      state = state.copyWith(selectedStatus: null);
+      state = state.copyWith(clearSelectedStatus: true);
     } else {
       state = state.copyWith(selectedStatus: status);
     }

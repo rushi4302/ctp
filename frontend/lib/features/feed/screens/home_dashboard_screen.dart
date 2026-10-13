@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +7,7 @@ import '../../../core/constants/app_colors.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../providers/report_provider.dart';
 import '../../../shared/models/report_model.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 
 class HomeDashboardScreen extends ConsumerStatefulWidget {
   const HomeDashboardScreen({super.key});
@@ -15,6 +17,8 @@ class HomeDashboardScreen extends ConsumerStatefulWidget {
 }
 
 class _HomeDashboardScreenState extends ConsumerState<HomeDashboardScreen> {
+  final _searchController = TextEditingController();
+  Timer? _searchDebounce;
   final List<String> _categories = [
     'All',
     'Pothole/Road Damage',
@@ -25,6 +29,20 @@ class _HomeDashboardScreenState extends ConsumerState<HomeDashboardScreen> {
     'Traffic Issue',
     'Other',
   ];
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 350), () {
+      ref.read(reportListProvider.notifier).searchReports(value.trim());
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -43,6 +61,11 @@ class _HomeDashboardScreenState extends ConsumerState<HomeDashboardScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.account_circle_outlined),
+            tooltip: 'Profile',
+            onPressed: () => context.push('/profile'),
+          ),
           IconButton(
             icon: const Icon(Icons.analytics_outlined),
             tooltip: 'Public Transparency',
@@ -103,6 +126,29 @@ class _HomeDashboardScreenState extends ConsumerState<HomeDashboardScreen> {
               ),
             ),
 
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+              child: TextField(
+                controller: _searchController,
+                onChanged: _onSearchChanged,
+                decoration: InputDecoration(
+                  hintText: 'Search civic reports',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: IconButton(
+                    tooltip: 'Clear search',
+                    onPressed: () {
+                      _searchController.clear();
+                      _onSearchChanged('');
+                    },
+                    icon: const Icon(Icons.clear),
+                  ),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                ),
+              ),
+            ),
+
             // Category Filter Chips
             Container(
               height: 52,
@@ -137,10 +183,42 @@ class _HomeDashboardScreenState extends ConsumerState<HomeDashboardScreen> {
                 },
               ),
             ),
+            SizedBox(
+              height: 44,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                children: [
+                  for (final entry in const [
+                    ('All statuses', null),
+                    ('Submitted', 'SUBMITTED'),
+                    ('Verified', 'VERIFIED'),
+                    ('In progress', 'IN_PROGRESS'),
+                    ('Resolved', 'RESOLVED'),
+                  ])
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: FilterChip(
+                        label: Text(entry.$1),
+                        selected: reportState.selectedStatus == entry.$2,
+                        onSelected: (_) => ref.read(reportListProvider.notifier).filterStatus(entry.$2),
+                      ),
+                    ),
+                ],
+              ),
+            ),
 
             // Reports List
             Expanded(
-              child: reportState.isLoading && reportState.reports.isEmpty
+              child: reportState.errorMessage != null && reportState.reports.isEmpty
+                  ? Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Text(reportState.errorMessage!, textAlign: TextAlign.center),
+                        const SizedBox(height: 8),
+                        FilledButton(onPressed: () => ref.read(reportListProvider.notifier).fetchReports(), child: const Text('Retry')),
+                      ]),
+                    )
+                  : reportState.isLoading && reportState.reports.isEmpty
                   ? const Center(child: CircularProgressIndicator())
                   : reportState.reports.isEmpty
                       ? Center(
@@ -218,6 +296,15 @@ class _ReportCard extends ConsumerWidget {
                       ),
                     ),
                   ),
+                  if (report.isSynthetic)
+                    const Text(
+                      'Demo',
+                      style: TextStyle(
+                        color: Colors.deepOrange,
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                     decoration: BoxDecoration(
@@ -225,7 +312,7 @@ class _ReportCard extends ConsumerWidget {
                       borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
-                      report.status,
+                      humanizeStatus(report.status),
                       style: TextStyle(
                         color: statusColor,
                         fontSize: 11,
@@ -239,7 +326,7 @@ class _ReportCard extends ConsumerWidget {
 
               // Title
               Text(
-                report.title,
+                presentComplaintTitle(report.title, isSynthetic: report.isSynthetic),
                 style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.bold,
@@ -250,7 +337,7 @@ class _ReportCard extends ConsumerWidget {
 
               // Description preview
               Text(
-                report.description,
+                presentComplaintDescription(report.description, isSynthetic: report.isSynthetic),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),

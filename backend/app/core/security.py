@@ -1,6 +1,9 @@
-from passlib.context import CryptContext
+import base64
 import hashlib
 from datetime import datetime, timedelta, timezone
+import secrets
+
+import bcrypt
 from jose import jwt
 
 from fastapi.security import HTTPBearer
@@ -8,33 +11,43 @@ from fastapi.security import HTTPBearer
 security = HTTPBearer()
 optional_security = HTTPBearer(auto_error=False)
 
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-)
-
 from secrets import token_urlsafe
-from datetime import datetime, timedelta
 
 
 # Password Hashing
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 600_000)
+    return "pbkdf2_sha256${}${}${}".format(
+        600_000,
+        base64.urlsafe_b64encode(salt).decode("ascii"),
+        base64.urlsafe_b64encode(digest).decode("ascii"),
+    )
 
 def verify_password(
     plain_password: str,
     hashed_password: str,
 ) -> bool:
-    return pwd_context.verify(
-        plain_password,
-        hashed_password,
-    )
+    try:
+        if hashed_password.startswith("pbkdf2_sha256$"):
+            scheme, rounds, salt, expected = hashed_password.split("$", 3)
+            salt_bytes = base64.urlsafe_b64decode(salt.encode("ascii"))
+            expected_bytes = base64.urlsafe_b64decode(expected.encode("ascii"))
+            actual = hashlib.pbkdf2_hmac(
+                "sha256", plain_password.encode("utf-8"), salt_bytes, int(rounds)
+            )
+            return secrets.compare_digest(actual, expected_bytes)
+        # Continue to accept existing bcrypt hashes. New hashes use PBKDF2 so
+        # authentication does not depend on Passlib's incompatible bcrypt probe.
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("ascii"))
+    except (ValueError, TypeError, UnicodeError):
+        return False
 
 from app.core.config import settings
 
 # JWT Configuration sourced from application settings
 def get_secret_key() -> str:
-    return settings.jwt_secret_key or "civic-intelligence-secret-key-32-chars-long-4302"
+    return settings.jwt_secret_key
 
 def get_algorithm() -> str:
     return settings.jwt_algorithm or "HS256"
@@ -77,6 +90,4 @@ def get_reset_token_expiry() -> datetime:
 
 def hash_reset_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
-
-
 

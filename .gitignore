@@ -106,3 +106,6 @@ ai/models/
 ai/datasets/
 ai/nlp/dataset/
 
+
+# Project root Python environment
+/ctp_env/

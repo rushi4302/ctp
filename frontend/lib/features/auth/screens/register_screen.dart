@@ -16,7 +16,6 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  String _selectedRole = 'citizen';
   bool _obscurePassword = true;
 
   @override
@@ -34,7 +33,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
           email: _emailController.text,
           password: _passwordController.text,
           fullName: _nameController.text,
-          role: _selectedRole,
+          role: 'citizen',
         );
 
     if (success && mounted) {
@@ -151,31 +150,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                       fillColor: Colors.white,
                     ),
                     validator: (val) {
-                      if (val == null || val.length < 6) return 'Password must be at least 6 characters';
+                      if (val == null || val.length < 8) return 'Password must be at least 8 characters';
                       return null;
                     },
                   ),
                   const SizedBox(height: 16),
 
-                  // Role Selection
-                  DropdownButtonFormField<String>(
-                    value: _selectedRole,
-                    decoration: InputDecoration(
-                      labelText: 'Account Role',
-                      prefixIcon: const Icon(Icons.badge_outlined),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                      filled: true,
-                      fillColor: Colors.white,
-                    ),
-                    items: const [
-                      DropdownMenuItem(value: 'citizen', child: Text('Citizen (Public)')),
-                      DropdownMenuItem(value: 'municipality', child: Text('Municipal Staff / Admin')),
-                      DropdownMenuItem(value: 'contractor', child: Text('Contractor')),
-                    ],
-                    onChanged: (val) {
-                      if (val != null) setState(() => _selectedRole = val);
-                    },
-                  ),
                   const SizedBox(height: 28),
 
                   // Submit Button
@@ -208,7 +188,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                         style: TextStyle(color: AppColors.textSecondary),
                       ),
                       GestureDetector(
-                        onTap: () => context.pop(),
+                        onTap: () => context.go('/login'),
                         child: const Text(
                           'Sign in',
                           style: TextStyle(
@@ -218,6 +198,12 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextButton.icon(
+                    onPressed: () => context.go('/admin-login'),
+                    icon: const Icon(Icons.admin_panel_settings_outlined),
+                    label: const Text('Administrator / municipal staff sign in'),
                   ),
                 ],
               ),

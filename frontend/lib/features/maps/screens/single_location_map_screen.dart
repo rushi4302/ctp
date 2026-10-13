@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../core/constants/app_colors.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 
 class SingleLocationMapScreen extends StatefulWidget {
   final double latitude;
@@ -97,7 +98,7 @@ class _SingleLocationMapScreenState extends State<SingleLocationMapScreen> {
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(
-                        widget.status!,
+                        humanizeStatus(widget.status!),
                         style: TextStyle(
                           color: AppColors.getStatusColor(widget.status!),
                           fontWeight: FontWeight.bold,

@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,9 +6,9 @@ import 'package:go_router/go_router.dart';
 import '../../../core/constants/app_colors.dart';
 import '../../../core/services/civic_issue_service.dart';
 import '../../../core/services/location_service.dart';
-import 'package:geolocator/geolocator.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../../../shared/models/civic_issue_model.dart';
+import '../../../shared/utils/complaint_presentation.dart';
 import 'civic_issue_detail_screen.dart';
 
 class MunicipalityDashboardScreen extends ConsumerStatefulWidget {
@@ -22,7 +22,6 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
   final _civicIssueService = CivicIssueService();
 
   bool _isLoading = true;
-  Map<String, dynamic> _stats = {};
   List<CivicIssueModel> _issues = [];
   String? _statusFilter;
 
@@ -46,10 +45,56 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
     }
   }
 
+  Future<void> _assignDepartment(CivicIssueModel issue) async {
+    final departmentController = TextEditingController(
+      text: issue.assignedDepartmentId == null
+          ? ''
+          : presentDepartment(issue.assignedDepartmentId!, isSynthetic: issue.isSynthetic),
+    );
+    final notesController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Assign issue #${issue.id}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: departmentController, decoration: const InputDecoration(labelText: 'Department')),
+            TextField(controller: notesController, decoration: const InputDecoration(labelText: 'Assignment note (optional)')),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(dialogContext, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(dialogContext, true), child: const Text('Save assignment')),
+        ],
+      ),
+    );
+    if (confirmed != true || departmentController.text.trim().isEmpty) {
+      departmentController.dispose();
+      notesController.dispose();
+      return;
+    }
+    try {
+      await _civicIssueService.assignDepartment(
+        issue.id,
+        department: departmentController.text,
+        notes: notesController.text,
+      );
+      await _loadDashboard();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Department assignment saved.')));
+    } catch (error) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Assignment failed: $error')));
+    } finally {
+      departmentController.dispose();
+      notesController.dispose();
+    }
+  }
+
   void _showStatusDialog(CivicIssueModel issue) {
     String selectedStatus = issue.status;
     final commentCtrl = TextEditingController();
-    File? evidenceImage;
+    XFile? evidenceImage;
+    Uint8List? evidenceImageBytes;
     CivicLocationData? resolutionLocation;
     DateTime? resolutionTimestamp;
     bool isSubmitting = false;
@@ -62,7 +107,11 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
             final picker = ImagePicker();
             final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 80);
             if (picked != null) {
-              setDialogState(() => evidenceImage = File(picked.path));
+              final bytes = await picked.readAsBytes();
+              setDialogState(() {
+                evidenceImage = picked;
+                evidenceImageBytes = bytes;
+              });
               // Immediately fetch GPS
               try {
                 final locData = await LocationService().getCurrentLocation(doReverseGeocode: false);
@@ -87,11 +136,11 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                     value: selectedStatus,
                     decoration: const InputDecoration(labelText: 'Status'),
                     items: const [
-                      DropdownMenuItem(value: 'PENDING', child: Text('PENDING')),
-                      DropdownMenuItem(value: 'ASSIGNED', child: Text('ASSIGNED')),
-                      DropdownMenuItem(value: 'IN_PROGRESS', child: Text('IN_PROGRESS')),
-                      DropdownMenuItem(value: 'RESOLVED', child: Text('RESOLVED')),
-                      DropdownMenuItem(value: 'CLOSED', child: Text('CLOSED')),
+                      DropdownMenuItem(value: 'PENDING', child: Text('Pending')),
+                      DropdownMenuItem(value: 'ASSIGNED', child: Text('Assigned')),
+                      DropdownMenuItem(value: 'IN_PROGRESS', child: Text('In Progress')),
+                      DropdownMenuItem(value: 'RESOLVED', child: Text('Resolved')),
+                      DropdownMenuItem(value: 'CLOSED', child: Text('Closed')),
                     ],
                     onChanged: (val) {
                       if (val != null) setDialogState(() => selectedStatus = val);
@@ -116,11 +165,14 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                         children: [
                           ClipRRect(
                             borderRadius: BorderRadius.circular(8),
-                            child: Image.file(evidenceImage!, height: 120, width: double.infinity, fit: BoxFit.cover),
+                            child: Image.memory(evidenceImageBytes!, height: 120, width: double.infinity, fit: BoxFit.cover),
                           ),
                           IconButton(
                             icon: const Icon(Icons.close, color: Colors.white),
-                            onPressed: () => setDialogState(() => evidenceImage = null),
+                            onPressed: () => setDialogState(() {
+                              evidenceImage = null;
+                              evidenceImageBytes = null;
+                            }),
                           ),
                         ],
                       )
@@ -162,7 +214,8 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                             await _civicIssueService.resolveCivicIssue(
                               issue.id,
                               comment,
-                              imagePath: evidenceImage?.path,
+                              imageBytes: evidenceImageBytes,
+                              imageName: evidenceImage?.name,
                               latitude: resolutionLocation?.latitude,
                               longitude: resolutionLocation?.longitude,
                               timestamp: resolutionTimestamp,
@@ -176,7 +229,12 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                           }
                           if (mounted) {
                             Navigator.pop(ctx);
-                            _loadDashboard();
+                            await _loadDashboard();
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text(selectedStatus == 'RESOLVED' ? 'Issue resolved and saved.' : 'Issue status updated.')),
+                              );
+                            }
                           }
                         } catch (e) {
                           setDialogState(() => isSubmitting = false);
@@ -242,12 +300,12 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          _buildFilterChip('ALL', null),
-                          _buildFilterChip('PENDING', 'PENDING'),
-                          _buildFilterChip('ASSIGNED', 'ASSIGNED'),
-                          _buildFilterChip('IN_PROGRESS', 'IN_PROGRESS'),
-                          _buildFilterChip('RESOLVED', 'RESOLVED'),
-                          _buildFilterChip('CLOSED', 'CLOSED'),
+                          _buildFilterChip('All', null),
+                          _buildFilterChip('Pending', 'PENDING'),
+                          _buildFilterChip('Assigned', 'ASSIGNED'),
+                          _buildFilterChip('In Progress', 'IN_PROGRESS'),
+                          _buildFilterChip('Resolved', 'RESOLVED'),
+                          _buildFilterChip('Closed', 'CLOSED'),
                         ],
                       ),
                     ),
@@ -296,7 +354,7 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                                           borderRadius: BorderRadius.circular(6),
                                         ),
                                         child: Text(
-                                          i.status,
+                                          humanizeStatus(i.status),
                                           style: TextStyle(color: statusColor, fontWeight: FontWeight.bold, fontSize: 11),
                                         ),
                                       ),
@@ -304,16 +362,32 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                                   ),
                                   const SizedBox(height: 6),
                                   Text(
-                                    i.title,
+                                    presentComplaintTitle(i.title, isSynthetic: i.isSynthetic),
                                     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    i.description,
+                                    presentComplaintDescription(i.description, isSynthetic: i.isSynthetic),
                                     maxLines: 2,
                                     overflow: TextOverflow.ellipsis,
                                     style: const TextStyle(fontSize: 13, color: AppColors.textSecondary),
                                   ),
+                                  if (i.assignedDepartmentId != null && i.assignedDepartmentId!.isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 5),
+                                      child: Text(
+                                        'Department: ${presentDepartment(i.assignedDepartmentId!, isSynthetic: i.isSynthetic)}${i.isSynthetic ? ' · Demonstration assignment' : ''}',
+                                        style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                                      ),
+                                    ),
+                                  if (i.isSynthetic)
+                                    const Padding(
+                                      padding: EdgeInsets.only(top: 5),
+                                      child: Text(
+                                        'Demonstration record · not an official municipal complaint',
+                                        style: TextStyle(fontSize: 11, color: Colors.deepOrange),
+                                      ),
+                                    ),
                                   const SizedBox(height: 8),
 
                                   // AI & Location chips
@@ -353,9 +427,16 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                                   const SizedBox(height: 10),
 
                                   // Action Buttons
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.end,
+                                  Wrap(
+                                    alignment: WrapAlignment.end,
+                                    spacing: 8,
+                                    runSpacing: 4,
                                     children: [
+                                      OutlinedButton.icon(
+                                        onPressed: () => _assignDepartment(i),
+                                        icon: const Icon(Icons.account_tree_outlined, size: 18),
+                                        label: const Text('Assign Department'),
+                                      ),
                                       OutlinedButton(
                                         onPressed: () {
                                           Navigator.push(
@@ -367,7 +448,6 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
                                         },
                                         child: const Text('View Detail'),
                                       ),
-                                      const SizedBox(width: 8),
                                       ElevatedButton(
                                         style: ElevatedButton.styleFrom(
                                           backgroundColor: AppColors.primary,
@@ -402,41 +482,6 @@ class _MunicipalityDashboardScreenState extends ConsumerState<MunicipalityDashbo
           setState(() => _statusFilter = statusVal);
           _loadDashboard();
         },
-      ),
-    );
-  }
-}
-
-class _StatCard extends StatelessWidget {
-  final String title;
-  final int count;
-  final Color color;
-
-  const _StatCard({required this.title, required this.count, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: Column(
-          children: [
-            Text(
-              count.toString(),
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: color),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              title,
-              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
-            ),
-          ],
-        ),
       ),
     );
   }

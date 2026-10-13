@@ -1,6 +1,11 @@
 # Civic Intelligence Platform 🏙️
 
-An intelligent, end-to-end civic engagement and municipal resolution platform. Citizens can report neighborhood grievances with photos, GPS coordinates, and descriptions. The system automatically validates locations, extracts EXIF metadata, runs offline multimodal AI models (XLM-RoBERTa for complaint text and MobileNet TFLite for civic issue images), and routes reports to municipal authorities for verification, action, and resolution.
+An end-to-end civic engagement and municipal resolution platform focused on
+Wagholi and Pune. Citizens can report neighborhood issues with photos, GPS
+coordinates, and descriptions. The backend validates locations, extracts EXIF
+metadata, runs the available TFLite image classifier, and routes reports to
+municipal authorities for review and resolution. Missing AI models are reported
+as unavailable; the service does not fabricate predictions.
 
 ---
 
@@ -15,9 +20,9 @@ flowchart TD
     FastAPI --> AIService[Multimodal AI Engine]
     
     subgraph AI Engine
-        AIService --> XLM[XLM-RoBERTa NLP Classifier]
+        AIService -. optional; assets required .-> XLM[XLM-RoBERTa NLP Classifier]
         AIService --> TFLite[Civic MobileNet TFLite]
-        AIService --> YOLO[Pretrained YOLOv8n]
+        AIService -. optional; Ultralytics required .-> YOLO[YOLO Object Detector]
     end
     
     FastAPI --> PostgreSQL[(PostgreSQL :5432)]
@@ -33,15 +38,15 @@ flowchart TD
    - Authentication (Registration, JWT Login, Password Reset, Secure Session).
    - Issue reporting with camera capture or gallery selection.
    - GPS coordinate acquisition and address geocoding.
-   - Real-time AI category recommendation ("AI Auto-Detect").
+   - Image-based AI category suggestion when the TFLite model is available.
    - Feed of community issues, personal submitted reports ("My Reports"), and interactive map.
    - Community upvoting (strictly 1 vote per user) and discussion comments.
 
-2. **Multimodal Civic AI Engine**:
-   - **XLM-RoBERTa Civic Classifier**: Classifies grievance text across key municipal categories (`Pothole/Road Damage`, `Garbage`, `Water Leakage`, `Streetlight Issue`, `Drainage Problem`, `Traffic Issue`).
-   - **Civic TFLite Classifier**: Classifies issue photos into civic categories (`Pothole/Road Damage`, `Garbage`, `Drainage Problem`).
-   - **Lazy Loading & In-Memory Caching**: Heavy models are initialized on demand and cached; inference runs without reloading 1GB weights per request.
-   - **Graceful Fallbacks**: Explicit error handling and fallback states if models are temporarily unavailable.
+2. **Civic AI Engine**:
+   - **Civic TFLite image classifier**: Runs real predictions for supported image categories and exposes confidence as model confidence, not accuracy.
+   - **Text classifier**: Integration reports unavailable because the XLM-RoBERTa model/tokenizer assets are not in the repository.
+   - **YOLO object detection**: Weights exist, but `ultralytics` is missing from the backend environment.
+   - AI failure does not prevent a citizen from submitting a report.
 
 3. **Image & Location Pipeline**:
    - MIME validation (JPEG, PNG) and file size limits (configurable, default 10MB).
@@ -101,7 +106,7 @@ flowchart TD
 │   │   └── shared/models/     # Data models with JSON deserialization
 │   └── test/                  # Widget and model unit tests
 ├── ai/
-│   ├── model/                 # civic_nlp_model (XLM-RoBERTa), civic_model.tflite, labels.txt
+│   ├── model/                 # civic_model.tflite and labels.txt
 │   └── test_images/           # Sample test images for validation
 └── docker-compose.yml         # PostgreSQL and Backend orchestration
 ```
@@ -110,20 +115,31 @@ flowchart TD
 
 ## Setup & Getting Started
 
+### AI model availability
+
+The repository includes `ai/model/civic_model.tflite` and `labels.txt`; this
+image classifier was loaded and run against a repository sample image. The
+`ai/nlp/civic_nlp_model/` weights/tokenizer directory is absent, so text
+classification reports unavailable and does not invent a result. YOLO weights
+are present, but object detection reports unavailable until `ultralytics` is
+installed in the backend environment.
+
 ### 1. Prerequisites
 - Docker & Docker Compose
 - Python 3.11+ / Python 3.12
 - Flutter SDK 3.24+ (Installed on system)
 
 ### 2. Environment Variables
-Create `backend/.env` (or copy from `.env.example`):
+Create `backend/.env` with local credentials (do not commit it). Backend settings
+force all development connections to `civic_db_test` on `127.0.0.1:5432` as
+`civic_user`, even if a supplied URL names another database:
 ```env
 APP_NAME="Civic Intelligence Platform"
 APP_VERSION="1.0.0"
-DEBUG=true
+DEBUG=false
 
 # PostgreSQL Connection
-DATABASE_URL=postgresql://civic_admin:civic_password@localhost:5432/civic_db
+DATABASE_URL=postgresql+psycopg://civic_user:<local-password>@127.0.0.1:5432/civic_db_test
 
 # JWT Security
 JWT_SECRET_KEY=your-secure-jwt-secret-key-at-least-32-chars
@@ -144,32 +160,65 @@ LOCATION_DISCREPANCY_THRESHOLD_METERS=500.0
 ```
 
 ### 3. Database & Migrations
-Ensure the PostgreSQL container is running:
+To use the optional isolated Docker test server, set `CIVIC_DB_TEST_PASSWORD`
+to the same local password used in `backend/.env`, then start the dedicated
+test service. It uses a new `civic_test_postgres_data` volume and never mounts
+the historic `postgres_data` volume:
 ```bash
-docker compose up -d postgres
+docker compose up -d postgres_test
 ```
 
-Run Alembic migrations:
+Or use a local PostgreSQL server with database `civic_db_test` and role
+`civic_user`. Initialize the database only if it does not exist, then apply the
+checked-in migration chain:
+
 ```bash
 cd backend
-./venv/bin/alembic current
-./venv/bin/alembic heads
-./venv/bin/alembic upgrade head
+../ctp_env/bin/python scripts/ensure_test_database.py
+../ctp_env/bin/alembic upgrade head
 ```
 
 ### 4. Running the Backend
 From the project root:
 ```bash
 cd backend
-./venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+../ctp_env/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-Interactive API Documentation will be available at: `http://localhost:8000/docs`
+The API docs are at `http://localhost:8000/docs`; `/health` confirms the
+database connection and verifies the selected database is `civic_db_test`.
+Copy `backend/.env.example` to `backend/.env`, replace the local PostgreSQL and
+JWT placeholders, and add the web development origin to `CORS_ORIGINS` when
+serving the web client from a different origin. Never commit `backend/.env`.
+
+Seed repeatable sample users, reports, categories, statuses, timestamps, Pune
+coordinates, and explicitly synthetic ward labels:
+```bash
+cd backend
+../ctp_env/bin/python scripts/seed_demo_data.py
+```
+
+Demo accounts use `demo.citizen1@synthetic.civic.org` through
+`demo.citizen6@synthetic.civic.org`, all with password `DemoCivic123!`.
+Every generated record is marked synthetic and is not municipal data.
+
+The civic health score is calculated from database issues using these weights:
+resolution 30%, handling 20%, unresolved severity 25%, stale pending age 15%,
+and repeat reports 10%. The response includes each component and its inputs.
+Severity penalties and pending-age penalties are normalized by the active issue
+count; repeat-report health uses the share of issues with multiple linked
+submissions. Scores are withheld below five active issues in the selected ward
+or overall scope instead of treating an empty ward as perfect.
+Official ward assignment requires a configured GeoJSON at
+`backend/app/data/ward_boundaries.geojson`; demo ward labels are synthetic.
 
 ### 5. Running the Flutter Frontend
 From the `frontend` directory:
 ```bash
 cd frontend
 flutter pub get
+flutter run -d chrome --dart-define=API_BASE_URL=http://127.0.0.1:8000
+# or create the static web build (set API_BASE_URL in your shell first)
+API_BASE_URL=http://127.0.0.1:8000 ./tool/build_web.sh
 flutter run -d chrome     # Run on Web
 # or
 flutter run -d macos      # Run on macOS Desktop
@@ -177,14 +226,92 @@ flutter run -d macos      # Run on macOS Desktop
 flutter run               # Run on connected iOS/Android device
 ```
 
+The website is the Flutter web build of the same client and uses the same
+FastAPI API, authentication, and database as Android. The public landing page,
+registration, sign-in, report flow, complaint explorer/detail, transparency
+dashboard, public map/list, and protected authority dashboard share these
+routes and APIs. It is not a separate data store or second backend.
+
+### Secure administrator and staff setup
+
+Apply the `civic_db_test` migrations first. From `backend`, create the initial
+administrator once:
+
+```bash
+../ctp_env/bin/python scripts/create_admin.py
+```
+
+The command checks both the configured database and PostgreSQL's
+`current_database()`, prompts for an email, and reads the password twice with
+hidden input. Choose a unique email and a 12–128 character password; the
+password is hashed with the app's existing PBKDF2 password hasher and is never
+printed. The first run creates an admin. Later runs refuse to overwrite or
+reset any administrator. There is no public admin-registration endpoint.
+
+Sign in through the website's **Administrator / municipal staff sign in** link
+(`/admin-login`) or the Flutter app's sign-in screen. Citizen registration does
+not grant staff privileges. The protected dashboard remains at `/municipality`.
+After login, verify the role on `/api/v1/me` (the response must report
+`"role":"admin"`) or open the protected `/api/v1/admin-test`. Additional
+municipal or field-worker accounts can be created from a trusted backend shell
+with `../ctp_env/bin/python scripts/create_staff.py`; the command requires an
+existing admin, accepts only `municipality` or `field_worker`, and prompts for
+the password securely. Give staff their temporary credentials through a
+private channel and have them change passwords through the secured recovery
+flow once mail delivery is configured. Do not create staff through public
+registration.
+
+### Google Maps keys
+
+The app uses `google_maps_flutter` on Android and web. In Google Cloud Console,
+create a project, attach billing, and enable **Maps SDK for Android** and
+**Maps JavaScript API**. Create separate API keys:
+
+1. For Android, set application restriction to **Android apps**, package name
+   `com.example.frontend`, and the SHA-1 certificate fingerprint. Get the local
+   debug fingerprint from `cd frontend/android && ./gradlew signingReport`.
+   Restrict this key to Maps SDK for Android. Put it in the ignored
+   `frontend/android/local.properties` as `MAPS_API_KEY=YOUR_ANDROID_KEY`.
+2. For web, set application restriction to **Websites** and allow only your
+   local origin while developing (for example `http://localhost:5000/*`) plus
+   the deployed HTTPS site origin. Restrict the key to Maps JavaScript API.
+   Export `MAPS_API_KEY=YOUR_RESTRICTED_BROWSER_KEY` and
+   `API_BASE_URL=https://your-api-host` in the local build shell, then run
+   `./tool/build_web.sh` from `frontend`. This injects the key into the generated
+   browser build only; browser keys are visible to visitors and must remain
+   referrer/API restricted.
+
+Without a Maps key, both clients keep the real complaint-location list
+available and clearly report that map tiles are unconfigured.
+
+### Physical Android phone on the same Wi-Fi
+
+1. Connect the Mac and phone to the same Wi-Fi network. Find the Mac's private
+   IPv4 address in System Settings → Wi-Fi → Details → TCP/IP (for example,
+   `192.168.1.24`). Do not use `localhost` or `10.0.2.2` on a physical phone.
+2. Start the backend with `--host 0.0.0.0` as above and confirm
+   `http://<mac-ip>:8000/health` opens from the phone's browser. Allow incoming
+   connections for Python if macOS asks.
+3. From `frontend`, run:
+   ```bash
+   flutter pub get
+   flutter run -d <device-id> --dart-define=API_BASE_URL=http://<mac-ip>:8000
+   ```
+   Find the device ID with `flutter devices`. The Android app allows cleartext
+   HTTP for local development; use HTTPS for a deployed backend.
+4. To use Google Maps, put `MAPS_API_KEY=<your-restricted-key>` in the ignored
+   `frontend/android/local.properties` file. Without a configured Maps key,
+   use the app's list view; report submission, feeds, and dashboard APIs do not
+   depend on Google Maps.
+
 ---
 
 ## Testing
 
 ### Backend Test Suite
-Run the 33 comprehensive unit and integration tests:
+Run the backend unit and integration tests:
 ```bash
-PYTHONPATH=backend ./backend/venv/bin/pytest -v backend/tests
+PYTHONPATH=backend ./ctp_env/bin/pytest -v backend/tests
 ```
 Tests cover:
 - User registration, duplicate checks, password validation.

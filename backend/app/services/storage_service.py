@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import HTTPException, UploadFile, status
 
 from app.core.config import settings
-from app.validators.image_validator import validate_image_file
+from app.validators.image_validator import validate_image_content, validate_image_file
 
 
 class StorageService:
@@ -47,6 +47,7 @@ class StorageService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Uploaded file is empty.",
             )
+        validate_image_content(file, content)
 
         # Generate unique and safe filename
         original_sanitized = cls.sanitize_filename(file.filename or "upload.jpg")
@@ -63,8 +64,18 @@ class StorageService:
                 detail="Invalid file path detected.",
             )
 
-        with open(target_path, "wb") as f:
-            f.write(content)
+        try:
+            with open(target_path, "wb") as f:
+                f.write(content)
+        except OSError as exc:
+            try:
+                target_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Uploaded image could not be stored.",
+            ) from exc
 
         file_url = f"/uploads/{unique_filename}"
 

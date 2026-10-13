@@ -151,6 +151,8 @@ class ReportModel {
   int upvotesCount;
   bool hasUpvoted;
   final int? civicIssueId;
+  final int relatedReportCount;
+  final bool isSynthetic;
   final String moderationStatus;
   final String? rejectionReason;
   final DateTime? rejectedAt;
@@ -189,6 +191,8 @@ class ReportModel {
     this.upvotesCount = 0,
     this.hasUpvoted = false,
     this.civicIssueId,
+    this.relatedReportCount = 1,
+    this.isSynthetic = false,
     this.moderationStatus = 'ACTIVE',
     this.rejectionReason,
     this.rejectedAt,
@@ -231,6 +235,8 @@ class ReportModel {
       upvotesCount: json['upvotes_count'] as int? ?? 0,
       hasUpvoted: json['has_upvoted'] as bool? ?? false,
       civicIssueId: json['civic_issue_id'] as int?,
+      relatedReportCount: json['related_report_count'] as int? ?? 1,
+      isSynthetic: json['is_synthetic'] as bool? ?? false,
       moderationStatus: json['moderation_status'] as String? ?? 'ACTIVE',
       rejectionReason: json['rejection_reason'] as String?,
       rejectedAt: json['rejected_at'] != null

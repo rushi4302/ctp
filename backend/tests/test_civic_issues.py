@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.core.constants import CivicIssueStatus, ModerationStatus, ReportSeverity, ReportStatus
 from app.models.report import CivicIssue, Report
 from app.models.user import User
+from app.services.civic_issue_service import CivicIssueService
+from app.services.storage_service import StorageService
 
 
 def test_scenario_1_and_2_duplicate_civic_issue_detection(client: TestClient, citizen_headers: dict):
@@ -60,6 +62,8 @@ def test_scenario_1_and_2_duplicate_civic_issue_detection(client: TestClient, ci
 
     # Must be linked to the same Civic Issue!
     assert data2["civic_issue_id"] == civic_issue_id
+    assert data2["related_report_count"] == 2
+    assert data2["is_synthetic"] is False
 
     # Civic Issue report_count should now be 2
     issue_res2 = client.get(f"/api/v1/civic-issues/{civic_issue_id}", headers=citizen_headers)
@@ -92,6 +96,245 @@ def test_different_location_creates_new_civic_issue(client: TestClient, citizen_
     issue_res = client.get(f"/api/v1/civic-issues/{new_issue_id}", headers=citizen_headers)
     assert issue_res.status_code == 200
     assert issue_res.json()["report_count"] == 1
+
+
+def test_admin_can_assign_department_without_field_worker(
+    client: TestClient,
+    citizen_headers: dict,
+    admin_headers: dict,
+):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Department assignment test",
+            "description": "A road defect for testing municipal assignment.",
+            "category": "Pothole/Road Damage",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+            "severity": "MEDIUM",
+        },
+        headers=citizen_headers,
+    )
+    assert created.status_code == 201
+    issue_id = created.json()["civic_issue_id"]
+
+    denied = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/assign",
+        json={"department_id": "Roads Department"},
+        headers=citizen_headers,
+    )
+    assert denied.status_code == 403
+
+    assigned = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/assign",
+        json={"department_id": "Roads Department", "notes": "Route to ward road crew"},
+        headers=admin_headers,
+    )
+    assert assigned.status_code == 200
+    assert assigned.json()["assigned_department_id"] == "Roads Department"
+    assert assigned.json()["status"] == CivicIssueStatus.ASSIGNED.value
+
+    detail = client.get(f"/api/v1/civic-issues/{issue_id}", headers=citizen_headers)
+    assert detail.status_code == 200
+    assert detail.json()["status_logs"][-1]["comment"] == (
+        "Assigned to department Roads Department. Notes: Route to ward road crew"
+    )
+    assert detail.json()["reports"][0]["assigned_department_id"] == "Roads Department"
+
+
+def test_citizen_sees_admin_assignment_and_persisted_resolution(
+    client: TestClient,
+    citizen_headers: dict,
+    admin_headers: dict,
+):
+    submitted = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "End to end status flow",
+            "description": "Broken footpath for assignment and resolution flow test.",
+            "category": "Road Damage",
+            "latitude": 18.531,
+            "longitude": 73.861,
+            "severity": "MEDIUM",
+        },
+        headers=citizen_headers,
+    )
+    assert submitted.status_code == 201
+    report_id = submitted.json()["id"]
+    issue_id = submitted.json()["civic_issue_id"]
+
+    assigned = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/assign",
+        json={"department_id": "Roads Department"},
+        headers=admin_headers,
+    )
+    assert assigned.status_code == 200
+
+    progress = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/status",
+        json={"status": "IN_PROGRESS", "comment": "Repair crew dispatched"},
+        headers=admin_headers,
+    )
+    assert progress.status_code == 200
+
+    resolved = client.post(
+        f"/api/v1/civic-issues/{issue_id}/resolve",
+        data={"resolution_notes": "Footpath repaired and inspected."},
+        headers=admin_headers,
+    )
+    assert resolved.status_code == 200
+    assert resolved.json()["status"] == CivicIssueStatus.RESOLVED.value
+
+    citizen_view = client.get(f"/api/v1/reports/{report_id}", headers=citizen_headers)
+    assert citizen_view.status_code == 200
+    assert citizen_view.json()["status"] == ReportStatus.RESOLVED.value
+    assert citizen_view.json()["assigned_department_id"] == "Roads Department"
+
+
+def test_admin_resolution_multipart_persists_evidence_and_history(
+    client: TestClient,
+    citizen_headers: dict,
+    admin_headers: dict,
+    sample_image_bytes: bytes,
+):
+    submitted = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Synthetic resolution evidence integration test",
+            "description": "A test-only road defect for image upload verification.",
+            "category": "Pothole/Road Damage",
+            "latitude": 18.521,
+            "longitude": 73.857,
+        },
+        headers=citizen_headers,
+    )
+    assert submitted.status_code == 201
+    issue_id = submitted.json()["civic_issue_id"]
+    report_id = submitted.json()["id"]
+
+    resolved = client.post(
+        f"/api/v1/civic-issues/{issue_id}/resolve",
+        headers=admin_headers,
+        data={
+            "resolution_notes": "Verified repair, this is test evidence.",
+            "resolution_latitude": "18.5205",
+            "resolution_longitude": "73.8571",
+            "resolution_timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        files={"evidence_image": ("proof.jpg", sample_image_bytes, "image/jpeg")},
+    )
+    assert resolved.status_code == 200, resolved.text
+    payload = resolved.json()
+    assert payload["status"] == CivicIssueStatus.RESOLVED.value
+    assert payload["resolution_evidence_url"].startswith("/uploads/")
+
+    citizen_issue = client.get(f"/api/v1/civic-issues/{issue_id}", headers=citizen_headers)
+    citizen_report = client.get(f"/api/v1/reports/{report_id}", headers=citizen_headers)
+    assert citizen_issue.status_code == 200
+    assert citizen_report.status_code == 200
+    assert citizen_issue.json()["status"] == CivicIssueStatus.RESOLVED.value
+    assert citizen_issue.json()["resolution_evidence_url"] == payload["resolution_evidence_url"]
+    assert citizen_issue.json()["status_logs"][-1]["new_status"] == CivicIssueStatus.RESOLVED.value
+    assert citizen_report.json()["status"] == ReportStatus.RESOLVED.value
+
+    media = client.get(payload["resolution_evidence_url"])
+    assert media.status_code == 200
+    assert media.content == sample_image_bytes
+    StorageService.delete_file(payload["resolution_evidence_url"].rsplit("/", 1)[-1])
+
+
+def test_resolution_rejects_invalid_image_without_changing_status(
+    client: TestClient,
+    citizen_headers: dict,
+    admin_headers: dict,
+):
+    created = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "Invalid evidence test",
+            "description": "Test issue for invalid proof upload validation.",
+            "category": "Streetlight Issue",
+            "latitude": 18.522,
+            "longitude": 73.858,
+        },
+    )
+    issue_id = created.json()["civic_issue_id"]
+    response = client.post(
+        f"/api/v1/civic-issues/{issue_id}/resolve",
+        headers=admin_headers,
+        data={"resolution_notes": "Attempted invalid image upload."},
+        files={"evidence_image": ("fake.jpg", b"not really a JPEG", "image/jpeg")},
+    )
+    assert response.status_code == 400
+    current = client.get(f"/api/v1/civic-issues/{issue_id}", headers=citizen_headers)
+    assert current.json()["status"] == CivicIssueStatus.PENDING.value
+
+
+def test_citizen_cannot_upload_resolution_evidence(
+    client: TestClient,
+    citizen_headers: dict,
+    sample_image_bytes: bytes,
+):
+    created = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "Unauthorized evidence test",
+            "description": "Test issue for authorization on resolution uploads.",
+            "category": "Garbage",
+            "latitude": 18.523,
+            "longitude": 73.859,
+        },
+    )
+    issue_id = created.json()["civic_issue_id"]
+    before = {item.name for item in StorageService.get_upload_path().iterdir()}
+    response = client.post(
+        f"/api/v1/civic-issues/{issue_id}/resolve",
+        headers=citizen_headers,
+        data={"resolution_notes": "Citizen must not resolve."},
+        files={"evidence_image": ("proof.jpg", sample_image_bytes, "image/jpeg")},
+    )
+    after = {item.name for item in StorageService.get_upload_path().iterdir()}
+    assert response.status_code == 403
+    assert after == before
+
+
+def test_resolution_database_failure_rolls_back_and_removes_uploaded_file(
+    client: TestClient,
+    citizen_headers: dict,
+    admin_headers: dict,
+    sample_image_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "Resolution transaction failure test",
+            "description": "Test issue for failed resolution transaction cleanup.",
+            "category": "Drainage Problem",
+            "latitude": 18.524,
+            "longitude": 73.860,
+        },
+    )
+    issue_id = created.json()["civic_issue_id"]
+    before = {item.name for item in StorageService.get_upload_path().iterdir()}
+
+    def fail_commit(**kwargs):
+        raise RuntimeError("simulated database write failure")
+
+    monkeypatch.setattr(CivicIssueService, "resolve_with_evidence", fail_commit)
+    response = client.post(
+        f"/api/v1/civic-issues/{issue_id}/resolve",
+        headers=admin_headers,
+        data={"resolution_notes": "This update should roll back."},
+        files={"evidence_image": ("failure.jpg", sample_image_bytes, "image/jpeg")},
+    )
+    after = {item.name for item in StorageService.get_upload_path().iterdir()}
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Resolution update could not be saved. Please retry."
+    assert after == before
 
 
 def test_scenario_3_false_report_soft_moderation(
@@ -294,19 +537,26 @@ def test_public_transparency_and_civic_health_score(client: TestClient):
     assert "total_unique_civic_issues" in stats
     assert "open_issues" in stats
     assert "category_distribution" in stats
+    assert "severity_distribution" in stats
+    assert 0.0 <= stats["resolution_rate"] <= 100.0
 
     # 2. Civic Health Score (0 - 100)
     score_res = client.get("/api/v1/transparency/health-score")
     assert score_res.status_code == 200
     score_data = score_res.json()
-    assert 0.0 <= score_data["overall_score"] <= 100.0
-    assert score_data["rating"] in ["EXCELLENT", "GOOD", "AVERAGE", "NEEDS_ATTENTION"]
-    components = score_data["components"]
-    assert "resolution_score" in components
-    assert "response_score" in components
-    assert "severity_health" in components
-    assert "pending_age_health" in components
-    assert "recurrence_health" in components
+    if score_data["total_issues_analyzed"] < 5:
+        assert score_data["overall_score"] is None
+        assert score_data["rating"] == "INSUFFICIENT_DATA"
+        assert score_data["components"] == {}
+    else:
+        assert 0.0 <= score_data["overall_score"] <= 100.0
+        assert score_data["rating"] in ["EXCELLENT", "GOOD", "AVERAGE", "NEEDS_ATTENTION"]
+        components = score_data["components"]
+        assert "resolution_score" in components
+        assert "response_score" in components
+        assert "severity_health" in components
+        assert "pending_age_health" in components
+        assert "recurrence_health" in components
 
     # 3. Map points
     map_res = client.get("/api/v1/transparency/map")
@@ -319,3 +569,92 @@ def test_public_transparency_and_civic_health_score(client: TestClient):
         assert "longitude" in pt
         assert "category" in pt
         assert "status" in pt
+
+
+def test_public_map_filters_by_status_and_rejects_unknown_status(client, citizen_headers):
+    created = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "Map status filter test",
+            "description": "A damaged road needs a repair near the public market.",
+            "category": "Pothole/Road Damage",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+    )
+    assert created.status_code == 201
+    issue_id = created.json()["civic_issue_id"]
+
+    pending = client.get("/api/v1/transparency/map?status_filter=PENDING")
+    resolved = client.get("/api/v1/transparency/map?status_filter=RESOLVED")
+    invalid = client.get("/api/v1/transparency/map?status_filter=NOT_A_STATUS")
+    assert pending.status_code == 200
+    assert any(point["id"] == issue_id for point in pending.json())
+    assert all(point["id"] != issue_id for point in resolved.json())
+    assert invalid.status_code == 422
+
+
+def test_transparency_statistics_include_database_derived_locality_counts(client, citizen_headers):
+    response = client.post(
+        "/api/v1/reports",
+        headers=citizen_headers,
+        json={
+            "title": "Locality breakdown verification",
+            "description": "A blocked drain is holding water beside the community path.",
+            "category": "Drainage Problem",
+            "latitude": 18.58,
+            "longitude": 73.98,
+            "locality": "Wagholi",
+        },
+    )
+    assert response.status_code == 201
+
+    stats_response = client.get("/api/v1/transparency/stats")
+    assert stats_response.status_code == 200
+    stats = stats_response.json()
+    assert stats["locality_distribution"]["Wagholi"] == 1
+
+
+def test_reopen_moves_linked_reports_back_to_submitted_and_rejects_invalid_transition(
+    client: TestClient,
+    citizen_headers: dict,
+    municipality_headers: dict,
+):
+    created = client.post(
+        "/api/v1/reports",
+        json={
+            "title": "Reopen lifecycle test",
+            "description": "A water leak still remains after repair.",
+            "category": "Water Leakage",
+            "latitude": 18.5204,
+            "longitude": 73.8567,
+        },
+        headers=citizen_headers,
+    )
+    issue_id = created.json()["civic_issue_id"]
+    report_id = created.json()["id"]
+
+    resolved = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/status",
+        json={"status": "RESOLVED"},
+        headers=municipality_headers,
+    )
+    assert resolved.status_code == 200
+
+    invalid = client.patch(
+        f"/api/v1/civic-issues/{issue_id}/status",
+        json={"status": "ASSIGNED"},
+        headers=municipality_headers,
+    )
+    assert invalid.status_code == 409
+
+    reopened = client.post(
+        f"/api/v1/civic-issues/{issue_id}/reopen",
+        headers=citizen_headers,
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["status"] == CivicIssueStatus.PENDING.value
+    report = client.get(f"/api/v1/reports/{report_id}", headers=citizen_headers).json()
+    assert report["status"] == ReportStatus.SUBMITTED.value
+    assert report["status_logs"][-1]["new_status"] == ReportStatus.SUBMITTED.value

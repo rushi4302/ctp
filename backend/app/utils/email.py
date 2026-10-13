@@ -26,7 +26,7 @@ def get_mail_config() -> ConnectionConfig | None:
 async def send_reset_email(email: EmailStr, token: str):
     conf = get_mail_config()
     if not conf:
-        logger.warning(f"Mail service not configured. Reset token for {email}: {token}")
+        logger.warning("Password reset email was not sent because mail is not configured.")
         return
 
     reset_link = f"http://localhost:3000/reset-password?token={token}"

@@ -20,10 +20,10 @@ def get_current_user(
 
     try:
         payload = decode_access_token(credentials.credentials)
-        user_id = payload.get("sub")
-        if user_id is None:
+        user_id = int(payload["sub"])
+        if user_id < 1:
             raise credentials_exception
-    except (JWTError, AttributeError):
+    except (JWTError, AttributeError, KeyError, TypeError, ValueError):
         raise credentials_exception
 
     user = (
@@ -32,7 +32,7 @@ def get_current_user(
         .first()
     )
 
-    if user is None:
+    if user is None or not user.is_active:
         raise credentials_exception
 
     return user
@@ -50,6 +50,7 @@ def get_optional_current_user(
         user_id = payload.get("sub")
         if user_id is None:
             return None
-        return db.query(User).filter(User.id == int(user_id)).first()
+        user = db.query(User).filter(User.id == int(user_id)).first()
+        return user if user is not None and user.is_active else None
     except (JWTError, Exception):
         return None

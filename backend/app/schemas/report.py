@@ -3,7 +3,7 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, Field
 
 from app.core.constants import LocationValidationStatus, ReportSeverity, ReportStatus
-from app.schemas.user import UserResponse
+from app.schemas.user import UserResponse, UserSummaryResponse
 
 
 class MediaResponse(BaseModel):
@@ -32,7 +32,7 @@ class CommentResponse(BaseModel):
     user_id: int
     content: str
     created_at: datetime
-    user: Optional[UserResponse] = None
+    user: Optional[UserSummaryResponse] = None
 
     model_config = {"from_attributes": True}
 
@@ -45,7 +45,7 @@ class StatusLogResponse(BaseModel):
     new_status: str
     comment: Optional[str] = None
     created_at: datetime
-    changed_by: Optional[UserResponse] = None
+    changed_by: Optional[UserSummaryResponse] = None
 
     model_config = {"from_attributes": True}
 
@@ -113,6 +113,8 @@ class ReportResponse(BaseModel):
     upvotes_count: int = 0
     has_upvoted: bool = False
     civic_issue_id: Optional[int] = None
+    related_report_count: int = 1
+    is_synthetic: bool = False
     moderation_status: str = "ACTIVE"
     rejected_at: Optional[datetime] = None
     rejection_reason: Optional[str] = None
@@ -123,8 +125,8 @@ class ReportResponse(BaseModel):
 
 
 class ReportDetailResponse(ReportResponse):
-    reporter: Optional[UserResponse] = None
-    contractor: Optional[UserResponse] = None
+    reporter: Optional[UserSummaryResponse] = None
+    contractor: Optional[UserSummaryResponse] = None
     comments: List[CommentResponse] = []
     status_logs: List[StatusLogResponse] = []
 
