@@ -73,7 +73,7 @@ flowchart TD
 - **Backend**: FastAPI, Python 3.12/3.14, SQLAlchemy 2.0, Alembic, Pydantic v2, Python-Jose (JWT), Passlib (Bcrypt).
 - **Database**: PostgreSQL 17 (Docker container `civic_postgres`).
 - **AI / ML**: PyTorch, HuggingFace Transformers (XLM-RoBERTa), Google LiteRT / TFLite, Ultralytics YOLOv8, Pillow.
-- **Frontend**: Flutter 3.47 (Dart 3.13), Flutter Riverpod, GoRouter, Dio, Flutter Secure Storage, Google Maps Flutter, Geolocator, Image Picker.
+- **Frontend**: Flutter 3.47 (Dart 3.13), Flutter Riverpod, GoRouter, Dio, Flutter Secure Storage, Flutter Map (OpenStreetMap), Geolocator, Image Picker.
 - **DevOps**: Docker, Docker Compose, Pytest.
 
 ---
@@ -261,28 +261,14 @@ private channel and have them change passwords through the secured recovery
 flow once mail delivery is configured. Do not create staff through public
 registration.
 
-### Google Maps keys
+### OpenStreetMap tiles
 
-The app uses `google_maps_flutter` on Android and web. In Google Cloud Console,
-create a project, attach billing, and enable **Maps SDK for Android** and
-**Maps JavaScript API**. Create separate API keys:
-
-1. For Android, set application restriction to **Android apps**, package name
-   `com.example.frontend`, and the SHA-1 certificate fingerprint. Get the local
-   debug fingerprint from `cd frontend/android && ./gradlew signingReport`.
-   Restrict this key to Maps SDK for Android. Put it in the ignored
-   `frontend/android/local.properties` as `MAPS_API_KEY=YOUR_ANDROID_KEY`.
-2. For web, set application restriction to **Websites** and allow only your
-   local origin while developing (for example `http://localhost:5000/*`) plus
-   the deployed HTTPS site origin. Restrict the key to Maps JavaScript API.
-   Export `MAPS_API_KEY=YOUR_RESTRICTED_BROWSER_KEY` and
-   `API_BASE_URL=https://your-api-host` in the local build shell, then run
-   `./tool/build_web.sh` from `frontend`. This injects the key into the generated
-   browser build only; browser keys are visible to visitors and must remain
-   referrer/API restricted.
-
-Without a Maps key, both clients keep the real complaint-location list
-available and clearly report that map tiles are unconfigured.
+The Android and web maps use `flutter_map` with the OpenStreetMap standard tile
+service. No Maps API key is required. Map tiles require an internet connection;
+the map screens retain a list view if tile access is unavailable. Visible map
+attribution is `© OpenStreetMap contributors`. The app does not prefetch or
+bulk-download tiles; follow the
+[OpenStreetMap tile usage policy](https://operations.osmfoundation.org/policies/tiles/).
 
 ### Physical Android phone on the same Wi-Fi
 
@@ -299,10 +285,8 @@ available and clearly report that map tiles are unconfigured.
    ```
    Find the device ID with `flutter devices`. The Android app allows cleartext
    HTTP for local development; use HTTPS for a deployed backend.
-4. To use Google Maps, put `MAPS_API_KEY=<your-restricted-key>` in the ignored
-   `frontend/android/local.properties` file. Without a configured Maps key,
-   use the app's list view; report submission, feeds, and dashboard APIs do not
-   depend on Google Maps.
+4. The OpenStreetMap view requires no API key. Keep the phone online to load map
+   tiles; the list view remains available if the tile service cannot be reached.
 
 ---
 
